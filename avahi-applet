@@ -5,9 +5,35 @@ use Gtk2::Notify;
 use Net::DBus;
 use Net::DBus::GLib;
 use Net::Libdnet::Intf;
-use GDBM_File;
 
-our $intf = new Net::Libdnet::Intf;
+Gtk2->init;
+Gtk2::Notify->init("avahi");
+
+# -----------------------------------------------
+package Avahi::Database;
+use GDBM_File;
+use strict;
+
+our $database;
+
+sub init {
+	my $type = shift;
+	$database = bless {},$type;
+	my %hash;
+	my $fn;
+	foreach my $f ('/usr/lib/avahi/service-types', '/usr/lib/i386-linux-gnu/avahi/service-types.db') {
+		if (-r "$f") { $fn = $f; last; }
+	}
+	tie %hash, 'GDBM_File', $fn, &GDBM_READER, 0644 if $fn;
+	$database->{hash} = \%hash;
+}
+
+sub get {
+	my ($type,$key) = @_;
+	return undef unless $database;
+	return undef unless exists $database->{hash}{$key};
+	return $database->{hash}{$key};
+}
 
 # -----------------------------------------------
 package Avahi::Server;
@@ -63,7 +89,7 @@ use constant {
 	AVAHI_DOMAIN_UNSPEC=>"",
 };
 
-our %browsers = ();
+our %browsers;
 
 sub new {
 	my ($type,$server,$domain) = @_;
@@ -151,7 +177,7 @@ use constant {
 	AVAHI_DOMAIN_UNSPEC=>"",
 };
 
-our %browsers = ();
+our %browsers;
 
 sub new {
 	my ($type,$server,$domain) = @_;
@@ -238,9 +264,10 @@ use constant {
 	AVAHI_DOMAIN_UNSPEC=>"",
 };
 
-our %browsers = ();
-our %services = ();
-our %interfaces = ();
+our %browsers;
+our %services;
+our %interfaces;
+our %hosts;
 
 sub new {
 	my ($type,$server,$domain,$svtype) = @_;
@@ -297,6 +324,10 @@ sub ItemNew {
 		unless (exists $interfaces{$iname}) {
 			$interfaces{$iname} = Avahi::Interface->new($iname);
 		}
+		my $host = $service->{my}{host};
+		unless (exists $hosts{$interface}{$host}) {
+			$hosts{$interface}{$host} = Avahi::Host->new($server,$interface,$host);
+		}
 	}
 }
 sub ItemRemove {
@@ -325,6 +356,7 @@ sub cleanup {
 	my $type = shift;
 	%services = ();
 	%interfaces = ();
+	%hosts = ();
 }
 
 # -----------------------------------------------
@@ -357,11 +389,13 @@ sub new {
 		$self->{my}{txt} = [ map {pack('U*',@$_)} @{$result[9]} ];
 		$self->{my}{flags} = $result[10];
 	}
+	$self->{my}{descrip} = Avahi::Database->get($self->{my}{type});
 	print ref($self),": new\n";
 	print "  Interface: $self->{my}{interface} ($self->{my}{iname})\n";
 	print "  Protocol: ",{-1=>"unspecified",0=>"IPv6",1=>"IPv4"}->{$self->{my}{protocol}},"\n";
 	print "  Name: $self->{my}{name}\n";
 	print "  Type: $self->{my}{type}\n";
+	print "  Description: $self->{my}{descrip}\n";
 	print "  Domain: $self->{my}{domain}\n";
 	print "  Host: $self->{my}{host}\n";
 	print "  Alternate protocol: ",{-1=>"unspecified",0=>"IPv6",1=>"IPv4"}->{$self->{my}{aprotocol}},"\n";
@@ -379,21 +413,79 @@ use strict;
 
 sub new {
 	my ($type,$name) = @_;
-	my $self = $main::intf->get($name);
+	my $self = Avahi::Applet->get_intf($name);
 	print ref($self),": new\n";
 	print $self->print, "\n";
 	bless $self,$type;
-	$interfaces{$name} = $self;
 	return $self;
+}
+
+# -----------------------------------------------
+package Avahi::Host;
+use strict;
+
+sub new {
+	my ($type,$server,$interface,$name) = @_;
+	my $self = bless {},$type;
+	$self->{interface} = $interface;
+	$self->{name} = $name;
+	$self->{iname} = $server->GetNetworkInterfaceNameByIndex($interface);
+	my @result = $server->ResolveHostName($interface,-1,$name,-1,0);
+	if (@result) {
+		$self->{interface} = $result[0];
+		$self->{protocol} = $result[1];
+		$self->{name} = $result[2];
+		$self->{aprotocol} = $result[3];
+		$self->{address} = $result[4];
+		$self->{flags} = $result[5];
+	}
+	print ref($self),": new\n";
+	print " Interface: $self->{interface} ($self->{iname})\n";
+	print " Protocol: ",{-1=>"unspecified",0=>"IPv6",1=>"IPv4"}->{$self->{protocol}},"\n";
+	print " Name: $self->{name}\n";
+	print " Alternate protocol: ",{-1=>"unspecified",0=>"IPv6",1=>"IPv4"}->{$self->{aprotocol}},"\n";
+	print " Address: $self->{address}\n";
+	print " Flags: $self->{flags}\n";
+	return $self;
+}
+
+# -----------------------------------------------
+package Avahi::Notify;
+use base qw(Gtk2::Notify);
+use strict;
+
+sub new {
+	my ($type,$icon) = @_;
+	my $self;
+	if (Gtk2::Notify->can('new_with_status_icon')) {
+		$self = Gtk2::Notify->new_with_status_icon("Avahi","Avahi notification","gtk-connect",$icon);
+		$self->attach_to_status_icon($icon);
+	} else {
+		$self = Gtk2::Notify->new("Avahi","Avahi notification","gkt-connect");
+	}
+	$self->signal_connect_swapped('closed'=>\&Avahi::Notify::closed,$self);
+	bless $self,$type;
+	$self->{my}{state} = 0;
+	return $self;
+}
+sub notify {
+	my ($self,$summary,$message,$icon) = @_;
+}
+sub closed {
+	my ($self,$notify) = @_;
+	$self->{my}{state} = 0;
+	return Gtk2::EVENT_PROPAGATE;
 }
 
 # -----------------------------------------------
 package Avahi::Icon;
 use base qw(Gtk2::StatusIcon);
+use strict;
 
 sub new {
 	my $type = shift;
 	my $self = Gtk2::StatusIcon->new_from_stock('gtk-connect');
+	$self->{my}{notify} = Avahi::Notify->new($self);
 	$self->set_tooltip_text('Avahi applet.');
 	$self->set_visible(1);
 	$self->signal_connect_swapped('button-press-event'=>
@@ -457,15 +549,31 @@ sub size_changed {
 }
 
 # -----------------------------------------------
+package Avahi::Applet;
+use strict;
+
+our $applet;
+
+sub init {
+	my $type = shift;
+	return if $applet;
+	$applet = bless {},$type;
+	$applet->{icon} = new Avahi::Icon;
+	$applet->{server} = new Avahi::Server;
+	$applet->{intf} = new Net::Libdnet::Intf;
+	return;
+}
+
+sub get_intf {
+	my ($type,$name) = @_;
+	return $applet->{intf}->get($name);
+}
+
+# -----------------------------------------------
 package main;
 use strict;
 
-Gtk2->init;
-Gtk2::Notify->init("avahi");
-
-
-# ... initialize applet
-my $icon = new Avahi::Icon;
-my $server = new Avahi::Server;
+Avahi::Database->init;
+Avahi::Applet->init;
 
 Gtk2->main;
