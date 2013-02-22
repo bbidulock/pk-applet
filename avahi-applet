@@ -1,0 +1,471 @@
+#!/usr/bin/perl
+
+use Gtk2;
+use Gtk2::Notify;
+use Net::DBus;
+use Net::DBus::GLib;
+use Net::Libdnet::Intf;
+use GDBM_File;
+
+our $intf = new Net::Libdnet::Intf;
+
+# -----------------------------------------------
+package Avahi::Server;
+use base qw(Net::DBus::RemoteObject);
+use strict;
+
+sub new {
+	my $type = shift;
+	my $bus = Net::DBus::GLib->system;
+	my $service = $bus->get_service("org.freedesktop.Avahi");
+	my $self = $service->get_object("/");
+	bless $self,$type;
+	$self->{my}{bus} = $bus;
+	$self->{my}{version} = $self->GetVersionString;
+	$self->{my}{apivers} = $self->GetAPIVersion;
+	$self->{my}{hostname} = $self->GetHostName;
+	$self->{my}{domain} = $self->GetDomainName;
+	$self->{my}{fqdn} = $self->GetHostNameFqdn;
+	$self->{my}{nsssup} = $self->IsNSSSupportAvailable;
+	$self->{my}{state} = $self->GetState;
+	$self->{my}{cookie} = $self->GetLocalServiceCookie;
+	my $domain = $self->{my}{domain};
+	$self->{my}{local} = Avahi::ServiceTypeBrowser->new($self,"local");
+	$self->{my}{browse} = Avahi::DomainBrowser->new($self,"");
+	my $sigids = {};
+	$sigids->{StateChanged} = $self->connect_to_signal("StateChanged",sub{ $self->StateChanged(@_); });
+	$self->{my}{sigids} = $sigids;
+	return $self;
+}
+sub StateChanged {
+	my ($self,$state,$err) = @_;
+	$self->{my}{state} = $state;
+	print $self->get_object_path,": Server error $err\n" if $err;
+}
+sub destroy {
+	my $self = shift;
+	delete($self->{local})->destroy;
+	delete($self->{browse})->destroy;
+	while (my ($name,$sigid) = each %{$self->{my}{sigids}}) {
+		$self->disconnect_from_signal($name, $sigid);
+	}
+}
+
+
+# -----------------------------------------------
+package Avahi::DomainBrowser;
+use base qw(Net::DBus::RemoteObject);
+use strict;
+
+use constant {
+	AVAHI_IF_UNSPEC=>-1,
+	AVAHI_PROT_UNSPEC=>-1,
+	AVAHI_DOMAIN_UNSPEC=>"",
+};
+
+our %browsers = ();
+
+sub new {
+	my ($type,$server,$domain) = @_;
+	$domain=AVAHI_DOMAIN_UNSPEC unless $domain;
+	print "Calling DomainBrowserNew for domain '$domain'\n";
+	my $path = $server->DomainBrowserNew(AVAHI_IF_UNSPEC,AVAHI_PROT_UNSPEC,$domain,0,0);
+	my $self = $server->get_service->get_object($path);
+	print "Gotone DomainBrowserNew for domain '$domain'\n";
+	bless $self,$type;
+	$self->{my}{server} = $server;
+	$self->{my}{domain} = $domain;
+	my $sigids = {};
+	$sigids->{AllForNow}      = $self->connect_to_signal("AllForNow",     sub{ $self->AllForNow(@_);      });
+	$sigids->{CacheExhausted} = $self->connect_to_signal("CacheExhausted",sub{ $self->CacheExhausted(@_); });
+	$sigids->{Failure}        = $self->connect_to_signal("Failure",       sub{ $self->Failure(@_);        });
+	$sigids->{ItemNew}        = $self->connect_to_signal("ItemNew",       sub{ $self->ItemNew(@_);        });
+	$sigids->{ItemRemove}     = $self->connect_to_signal("ItemRemove",    sub{ $self->ItemRemove(@_);     });
+	$self->{my}{sigids} = $sigids;
+	$self->{my}{state} = 0;
+	print $self->get_object_path,": new for domain '$domain'\n";
+	return $self;
+}
+
+sub AllForNow {
+	my ($self) = @_;
+	print $self->get_object_path,": All for now...\n";
+}
+sub CacheExhausted {
+	my ($self) = @_;
+	print $self->get_object_path,": Cache exhausted...\n";
+	$self->{my}{state} = 1;
+	# we could update the screen now
+}
+sub Failure {
+	my ($self,$err) = @_;
+	print $self->get_object_path,": Failure: $err\n";
+	$self->{my}{state} = -1;
+}
+sub ItemNew {
+	my ($self,$interface,$protocol,$domain,$flags) = @_;
+	print $self->get_object_path,": ItemNew\n";
+	print "  Interface: $interface\n";
+	print "  Protocol: ",{-1=>"unspecified",0=>"IPv6",1=>"IPv4"}->{$protocol},"\n";
+	print "  Domain: $domain\n";
+	print "  Flags: $flags\n";
+	unless (exists $browsers{$domain}) {
+		my $server = $self->{my}{server};
+		$browsers{$domain} = Avahi::ServiceTypeBrowser->new($server,$domain);
+	}
+}
+sub ItemRemove {
+	my ($self,$interface,$protocol,$domain,$flags) = @_;
+	print $self->get_object_path,": ItemRemove\n";
+	print "  Interface: $interface\n";
+	print "  Protocol: ",{-1=>"unspecified",0=>"IPv6",1=>"IPv4"}->{$protocol},"\n";
+	print "  Domain: $domain\n";
+	print "  Flags: $flags\n";
+	if (exists $browsers{$domain}) {
+		delete($browsers{$domain})->destroy;
+	}
+}
+sub destroy {
+	my $self = shift;
+	while (my ($name,$sigid) = each %{$self->{my}{sigids}}) {
+		$self->disconnect_from_signal($name, $sigid);
+	}
+	$self->Free unless $self->{my}{state} == -1;
+}
+sub cleanup {
+	my $type = shift;
+	foreach my $svtype (values %browsers) {
+		$svtype->destroy;
+	}
+	%browsers = ();
+}
+
+# -----------------------------------------------
+package Avahi::ServiceTypeBrowser;
+use base qw(Net::DBus::RemoteObject);
+use strict;
+
+use constant {
+	AVAHI_IF_UNSPEC=>-1,
+	AVAHI_PROT_UNSPEC=>-1,
+	AVAHI_DOMAIN_UNSPEC=>"",
+};
+
+our %browsers = ();
+
+sub new {
+	my ($type,$server,$domain) = @_;
+	return $browsers{$domain} if exists $browsers{$domain};
+	print "Calling ServiceTypeBrowserNew for domain '$domain'\n";
+	my $path = $server->ServiceTypeBrowserNew(AVAHI_IF_UNSPEC,AVAHI_PROT_UNSPEC,$domain,0);
+	my $self = $server->get_service->get_object($path);
+	print "Gotone ServiceTypeBrowserNew for domain '$domain'\n";
+	bless $self,$type;
+	$self->{my}{server} = $server;
+	$self->{my}{domain} = $domain;
+	my $sigids = {};
+	$sigids->{AllForNow}      = $self->connect_to_signal("AllForNow",     sub{ $self->AllForNow(@_);      });
+	$sigids->{CacheExhausted} = $self->connect_to_signal("CacheExhausted",sub{ $self->CacheExhausted(@_); });
+	$sigids->{Failure}        = $self->connect_to_signal("Failure",       sub{ $self->Failure(@_);        });
+	$sigids->{ItemNew}        = $self->connect_to_signal("ItemNew",       sub{ $self->ItemNew(@_);        });
+	$sigids->{ItemRemove}     = $self->connect_to_signal("ItemRemove",    sub{ $self->ItemRemove(@_);     });
+	$self->{my}{sigids} = $sigids;
+	$self->{my}{state} = 0;
+	$self->{my}{browsers} = {};
+	$browsers{$domain} = $self;
+	print $self->get_object_path,": new for domain '$domain'\n";
+	return $self;
+}
+sub AllForNow {
+	my ($self) = @_;
+	print $self->get_object_path,": All for now...\n";
+}
+sub CacheExhausted {
+	my ($self) = @_;
+	print $self->get_object_path,": Cache exhausted...\n";
+	$self->{my}{state} = 1;
+}
+sub Failure {
+	my ($self,$err) = @_;
+	print $self->get_object_path,": Failure: $err\n";
+	$self->{my}{state} = -1;
+}
+sub ItemNew {
+	my ($self,$interface,$protocol,$svtype,$domain,$flags) = @_;
+	print $self->get_object_path,": ItemNew\n";
+	print "  Interface: $interface\n";
+	print "  Protocol: ",{-1=>"unspecified",0=>"IPv6",1=>"IPv4"}->{$protocol},"\n";
+	print "  Type: $svtype\n";
+	print "  Domain: $domain\n";
+	print "  Flags: $flags\n";
+	unless (exists $self->{my}{browsers}{$svtype}) {
+		my $server = $self->{my}{server};
+		$self->{my}{browsers}{$svtype} = Avahi::ServiceBrowser->new($server,$domain,$svtype);
+	}
+}
+sub ItemRemove {
+	my ($self,$interface,$protocol,$svtype,$domain,$flags) = @_;
+	print $self->get_object_path,": ItemRemove\n";
+	print "  Interface: $interface\n";
+	print "  Protocol: ",{-1=>"unspecified",0=>"IPv6",1=>"IPv4"}->{$protocol},"\n";
+	print "  Type: $svtype\n";
+	print "  Domain: $domain\n";
+	print "  Flags: $flags\n";
+	if (exists $self->{my}{browsers}{$svtype}) {
+		delete($self->{my}{browsers}{$svtype})->destroy;
+	}
+}
+sub destroy {
+	my $self = shift;
+	foreach my $svtype (values %{delete($self->{my}{browsers})}) {
+		$svtype->destroy;
+	}
+	while (my ($name,$sigid) = each %{$self->{my}{sigids}}) {
+		$self->disconnect_from_signal($name, $sigid);
+	}
+	$self->Free unless $self->{my}{state} == -1;
+}
+	
+
+# -----------------------------------------------
+package Avahi::ServiceBrowser;
+use base qw(Net::DBus::RemoteObject);
+use strict;
+
+use constant {
+	AVAHI_IF_UNSPEC=>-1,
+	AVAHI_PROT_UNSPEC=>-1,
+	AVAHI_DOMAIN_UNSPEC=>"",
+};
+
+our %browsers = ();
+our %services = ();
+our %interfaces = ();
+
+sub new {
+	my ($type,$server,$domain,$svtype) = @_;
+	return $browsers{$domain}{$svtype} if exists $browsers{$domain}{$svtype};
+	print "Calling ServiceBrowserNew for domain '$domain' type '$svtype'\n";
+	my $path = $server->ServiceBrowserNew(AVAHI_IF_UNSPEC,AVAHI_PROT_UNSPEC,$svtype,$domain,0);
+	my $self = $server->get_service->get_object($path);
+	print "Gotone ServiceBrowserNew for domain '$domain' type '$svtype'\n";
+	bless $self,$type;
+	$self->{my}{server} = $server;
+	$self->{my}{domain} = $domain;
+	$self->{my}{svtype} = $svtype;
+	my $sigids = {};
+	$sigids->{AllForNow}      = $self->connect_to_signal("AllForNow",     sub{ $self->AllForNow(@_);      });
+	$sigids->{CacheExhausted} = $self->connect_to_signal("CacheExhausted",sub{ $self->CacheExhausted(@_); });
+	$sigids->{Failure}        = $self->connect_to_signal("Failure",       sub{ $self->Failure(@_);        });
+	$sigids->{ItemNew}        = $self->connect_to_signal("ItemNew",       sub{ $self->ItemNew(@_);        });
+	$sigids->{ItemRemove}     = $self->connect_to_signal("ItemRemove",    sub{ $self->ItemRemove(@_);     });
+	$self->{my}{sigids} = $sigids;
+	$browsers{$domain}{$svtype} = $self;
+	print $self->get_object_path,": new for domain '$domain', type '$svtype'\n";
+	return $self;
+}
+sub AllForNow {
+	my ($self) = @_;
+	print $self->get_object_path,": All for now...\n";
+}
+sub CacheExhausted {
+	my ($self) = @_;
+	print $self->get_object_path,": Cache exhausted...\n";
+	$self->{my}{state} = 1;
+}
+sub Failure {
+	my ($self,$err) = @_;
+	print $self->get_object_path,": Failure: $err\n";
+	$self->{my}{state} = -1;
+}
+sub ItemNew {
+	my $self = shift;
+	my ($interface,$protocol,$name,$svtype,$domain,$flags) = @_;
+	print $self->get_object_path,": ItemNew\n";
+	print "  Interface: $interface\n";
+	print "  Protocol: ",{-1=>"unspecified",0=>"IPv6",1=>"IPv4"}->{$protocol},"\n";
+	print "  Name: $name\n";
+	print "  Type: $svtype\n";
+	print "  Domain: $domain\n";
+	print "  Flags: $flags\n";
+	my $key = join(':',@_);
+	unless (exists $services{$key}) {
+		my $server = $self->{my}{server};
+		my $service = Avahi::Service->new($server,@_);
+		$services{$key} = $service;
+		my $iname = $service->{my}{iname};
+		unless (exists $interfaces{$iname}) {
+			$interfaces{$iname} = Avahi::Interface->new($iname);
+		}
+	}
+}
+sub ItemRemove {
+	my $self = shift;
+	my ($interface,$protocol,$name,$svtype,$domain,$flags) = @_;
+	print $self->get_object_path,": ItemRemove\n";
+	print "  Interface: $interface\n";
+	print "  Protocol: ",{-1=>"unspecified",0=>"IPv6",1=>"IPv4"}->{$protocol},"\n";
+	print "  Name: $name\n";
+	print "  Type: $svtype\n";
+	print "  Domain: $domain\n";
+	print "  Flags: $flags\n";
+	my $key = join(':',@_);
+	if (exists $services{$key}) {
+		delete($services{$key})->destroy;
+	}
+}
+sub destroy {
+	my $self = shift;
+	while (my ($name,$sigid) = each %{$self->{my}{sigids}}) {
+		$self->disconnect_from_signal($name, $sigid);
+	}
+	$self->Free unless $self->{my}{state} == -1;
+}
+sub cleanup {
+	my $type = shift;
+	%services = ();
+	%interfaces = ();
+}
+
+# -----------------------------------------------
+package Avahi::Service;
+use strict;
+
+sub new {
+	my ($type,$server,$interface,$protocol,$name,$svtype,$domain,$flags) = @_;
+	my $self = {};
+	bless $self,$type;
+	$self->{my}{server} = $server;
+	$self->{my}{interface} = $interface;
+	$self->{my}{protocol} = $protocol;
+	$self->{my}{name} = $name;
+	$self->{my}{type} = $svtype;
+	$self->{my}{domain} = $domain;
+	$self->{my}{flags} = $flags;
+	$self->{my}{iname} = $server->GetNetworkInterfaceNameByIndex($interface);
+	my @result = $server->ResolveService($interface,$protocol,$name,$svtype,$domain,1,0);
+	if (@result) {
+		$self->{my}{interface} = $result[0];
+		$self->{my}{protocol} = $result[1];
+		$self->{my}{name} = $result[2];
+		$self->{my}{type} = $result[3];
+		$self->{my}{domain} = $result[4];
+		$self->{my}{host} = $result[5];
+		$self->{my}{aprotocol} = $result[6];
+		$self->{my}{address} = $result[7];
+		$self->{my}{port} = $result[8];
+		$self->{my}{txt} = [ map {pack('U*',@$_)} @{$result[9]} ];
+		$self->{my}{flags} = $result[10];
+	}
+	print ref($self),": new\n";
+	print "  Interface: $self->{my}{interface} ($self->{my}{iname})\n";
+	print "  Protocol: ",{-1=>"unspecified",0=>"IPv6",1=>"IPv4"}->{$self->{my}{protocol}},"\n";
+	print "  Name: $self->{my}{name}\n";
+	print "  Type: $self->{my}{type}\n";
+	print "  Domain: $self->{my}{domain}\n";
+	print "  Host: $self->{my}{host}\n";
+	print "  Alternate protocol: ",{-1=>"unspecified",0=>"IPv6",1=>"IPv4"}->{$self->{my}{aprotocol}},"\n";
+	print "  Address: $self->{my}{address}\n";
+	print "  Port: $self->{my}{port}\n";
+	print "  TXT: ",join(';',@{$self->{my}{txt}}),"\n";
+	print "  Flags: $self->{my}{flags}\n";
+	return $self;
+}
+
+# -----------------------------------------------
+package Avahi::Interface;
+use base qw(Net::Libdnet::Entry::Intf);
+use strict;
+
+sub new {
+	my ($type,$name) = @_;
+	my $self = $main::intf->get($name);
+	print ref($self),": new\n";
+	print $self->print, "\n";
+	bless $self,$type;
+	$interfaces{$name} = $self;
+	return $self;
+}
+
+# -----------------------------------------------
+package Avahi::Icon;
+use base qw(Gtk2::StatusIcon);
+
+sub new {
+	my $type = shift;
+	my $self = Gtk2::StatusIcon->new_from_stock('gtk-connect');
+	$self->set_tooltip_text('Avahi applet.');
+	$self->set_visible(1);
+	$self->signal_connect_swapped('button-press-event'=>
+			\&Avahi::Icon::button_press_event,$self);
+	$self->signal_connect_swapped('button-release-event'=>
+			\&Avahi::Icon::button_release_event,$self);
+	$self->signal_connect_swapped('scroll-event'=>
+			\&Avahi::Icon::scroll_event,$self);
+	$self->signal_connect_swapped('query-tooltip'=>
+			\&Avahi::Icon::query_tooltip,$self);
+	$self->signal_connect_swapped('popup-menu'=>
+			\&Avahi::Icon::popup_menu,$self);
+	$self->signal_connect_swapped('activate'=>
+			\&Avahi::Icon::activate,$self);
+	$self->signal_connect_swapped('size-changed'=>
+			\&Avahi::Icon::size_changed,$self);
+	bless $self,$type;
+	return $self;
+}
+sub button_press_event {
+	my ($self,$event,$icon) = @_;
+#print STDERR "button-press-event: ",join(', ',@_),"\n";
+#print STDERR "Button pressed!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub button_release_event {
+	my ($self,$event,$icon) = @_;
+#print STDERR "button-release-event: ",join(', ',@_),"\n";
+#print STDERR "Button released!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub scroll_event {
+	my ($self,$event,$icon) = @_;
+#print STDERR "scroll-event: ",join(', ',@_),"\n";
+#print STDERR "Scroll!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub query_tooltip {
+	my ($self,$x,$y,$bool,$tooltip,$icon) = @_;
+print STDERR "query-tooltip: ",join(', ',@_),"\n";
+print STDERR "Tooltip query!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub popup_menu {
+	my ($self,$button,$time,$icon) = @_;
+	print STDERR "popup-menu: ",join(', ',@_),"\n";
+	print STDERR "Popup menu!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub activate {
+	my ($self,$icon) = @_;
+	print STDERR "activate: ",join(', ',@_),"\n";
+	print STDERR "Activated!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub size_changed {
+	my ($self,$pixels,$icon) = @_;
+#print STDERR "size-changed: ",join(', ',@_),"\n";
+#print STDERR "Size changed to $pixels!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+
+# -----------------------------------------------
+package main;
+use strict;
+
+Gtk2->init;
+Gtk2::Notify->init("avahi");
+
+
+# ... initialize applet
+my $icon = new Avahi::Icon;
+my $server = new Avahi::Server;
+
+Gtk2->main;
