@@ -1,0 +1,591 @@
+#!/usr/bin/perl
+
+use Gtk2;
+use Gtk2::Notify;
+use Net::DBus;
+use Net::DBus::GLib;
+use Net::Libdnet::Intf;
+
+Gtk2->init;
+Gtk2::Notify->init("pk-applet");
+
+# -----------------------------------------------------------
+package Pk::Package;
+use strict;
+
+our %packages = ();
+
+sub new_from_summary {
+	my ($type,$info,$package_id,$summary) = @_;
+	my $self = $packages{$package_id};
+	if ($self) {
+		$self->{info} = $info;
+		$self->{summary} = $summary;
+		return $self;
+	}
+	$self = bless {
+		info=>$info,
+		id=>$package_id,
+		summary=>$summary,
+	}, $type;
+	my @data = split(/;/,$package_id);
+	$self->{name} = $data[0];
+	$self->{version} = $data[1];
+	$self->{arch} = $data[2];
+	$self->{source} = $data[3];
+	$packages{$package_id} = $self;
+#	$Pk::Service::service->GetDetails([$package_id]);
+	return $self;
+}
+sub new_from_details {
+	my ($type,$package_id,$license,$group,$detail,$url,$size) = @_;
+	my $self = $packages{$package_id};
+	if ($self) {
+		$self->{license} = $license;
+		$self->{group} = $group;
+		$self->{detail} = $detail;
+		$self->{url} = $url;
+		$self->{size} = $size;
+		return $self;
+	}
+	$self = bless {
+		id=>$package_id,
+
+	}, $type;
+	my @data = split(/;/,$package_id);
+	$self->{name} = $data[0];
+	$self->{version} = $data[1];
+	$self->{arch} = $data[2];
+	$self->{source} = $data[3];
+	$packages{$package_id} = $self;
+	return $self;
+}
+
+sub destroy {
+	delete $packages{shift->{id}};
+}
+
+# -----------------------------------------------------------
+package Pk::Transaction;
+use base qw(Net::DBus::RemoteObject);
+use strict;
+
+our %xactions = ();
+
+sub new {
+	my ($type,$service) = @_;
+	my $tid = $service->GetTid;
+	print STDERR "new Pk::Transaction $tid\n";
+	my $self = $service->get_service->get_object($tid);
+	bless $self,$type;
+	$self->{my}{tid} = $tid;
+	$xactions{$tid} = $self;
+	my $sigids = {};
+	$sigids->{Category}
+		= $self->connect_to_signal("Category",
+				sub{ $self->Category(@_); });
+	$sigids->{Details}
+		= $self->connect_to_signal("Details",
+				sub{ $self->Details(@_); });
+	$sigids->{ErrorCode}
+		= $self->connect_to_signal("ErrorCode",
+				sub{ $self->ErrorCode(@_); });
+	$sigids->{Files}
+		= $self->connect_to_signal("Files",
+				sub{ $self->Files(@_); });
+	$sigids->{Finished}
+		= $self->connect_to_signal("Finished",
+				sub{ $self->Finished(@_); });
+	$sigids->{Message}
+		= $self->connect_to_signal("Message",
+				sub{ $self->Message(@_); });
+	$sigids->{Package}
+		= $self->connect_to_signal("Package",
+				sub{ $self->Package(@_); });
+	$sigids->{RepoDetail}
+		= $self->connect_to_signal("RepoDetail",
+				sub{ $self->RepoDetail(@_); });
+	$sigids->{RepoSignatureRequired}
+		= $self->connect_to_signal("RepoSignatureRequired",
+				sub{ $self->RepoSignatureRequired(@_); });
+	$sigids->{EulaRequired}
+		= $self->connect_to_signal("EulaRequired",
+				sub{ $self->EulaRequired(@_); });
+	$sigids->{MediaChangeRequired}
+		= $self->connect_to_signal("MediaChangeRequired",
+				sub{ $self->MediaChangeRequired(@_); });
+	$sigids->{RequireRestart}
+		= $self->connect_to_signal("RequireRestart",
+				sub{ $self->RequireRestart(@_); });
+	$sigids->{Transaction}
+		= $self->connect_to_signal("Transaction",
+				sub{ $self->Transaction(@_); });
+	$sigids->{UpdateDetail}
+		= $self->connect_to_signal("UpdateDetail",
+				sub{ $self->UpdateDetail(@_); });
+	$sigids->{DistroUpgrade}
+		= $self->connect_to_signal("DistroUpgrade",
+				sub{ $self->DistroUpgrade(@_); });
+	$sigids->{ItemProgress}
+		= $self->connect_to_signal("ItemProgress",
+				sub{ $self->ItemProgress(@_); });
+	$sigids->{Changed}
+		= $self->connect_to_signal("Changed",
+				sub{ $self->Changed(@_); });
+	$sigids->{Destroy}
+		= $self->connect_to_signal("Destroy",
+				sub{ $self->Destroy(@_); });
+	$self->{my}{sigids} = $sigids;
+	$self->{my}{properties} = $self->GetAll("org.freedesktop.PackageKit.Transaction");
+	$self->dump;
+	return $self;
+}
+sub destroy {
+	my $self = shift;
+	my $tid = $self->{my}{tid};
+	print STDERR "destroy Pk::Transaction $tid\n";
+	delete $xactions{$tid};
+	while (my ($name,$sigid) = each %{$self->{my}{sigids}}) {
+		$self->disconnect_from_signal($name,$sigid);
+	}
+}
+sub dump {
+	my $self = shift;
+	my $props = $self->GetAll("org.freedesktop.PackageKit.Transaction");
+	foreach my $key (sort keys %$props) {
+		my $val = $props->{$key};
+		if (ref($val) eq 'ARRAY') {
+			$val = join(',',@$val);
+		} elsif (ref($val) eq 'HASH') {
+			$val = join(';',map {$_."=".$val->{$_}} sort keys %$val);
+		}
+		print STDERR " ",$key," = ",$val,"\n";
+	}
+	print STDERR "\n";
+}
+
+sub Category {
+	my $self = shift;
+	my ($parent_id,$cat_id,$name,$summary,$icon) = @_;
+	print STDERR "Category: ",join('|',@_),"\n";
+}
+sub Details {
+	my $self = shift;
+	my ($package_id,$license,$group,$detail,$url,$size) = @_;
+	print STDERR "Details: ",join('|',@_),"\n";
+	Pk::Package->new_from_detail(@_);
+}
+sub ErrorCode {
+	my $self = shift;
+	my ($code,$details) = @_;
+	print STDERR "ErrorCode: ",join('|',@_),"\n";
+}
+sub Files {
+	my $self = shift;
+	my ($package_id,$file_list) = @_;
+	print STDERR "Files: ",join('|',@_),"\n";
+}
+sub Finished {
+	my $self = shift;
+	my ($exit,$runtime) = @_;
+	print STDERR "Finished: ",join('|',@_),"\n";
+}
+sub Message {
+	my $self = shift;
+	my ($type,$details) = @_;
+	print STDERR "Message: ",join('|',@_),"\n";
+}
+sub Package {
+	my $self = shift;
+	my ($info,$package_id,$summary) = @_;
+	print STDERR "Package: ",join('|',@_),"\n";
+# info		= installed|available|normal|blocked (when updating)
+# package_id	= package_name;version-release;arch;installed|repo
+# summary	= one-line text summary
+	Pk::Package->new_from_summary(@_);
+}
+sub RepoDetail {
+	my $self = shift;
+	my ($repo_id,$description,$enabled) = @_;
+	print STDERR "RepoDetail: ",join('|',@_),"\n";
+}
+sub RepoSignatureRequired {
+	my $self = shift;
+	my ($package_id,$repository_name,$key_url,$key_userid,$key_id,$key_fingerprint,$key_timestamp,$type) = @_;
+	print STDERR "RepoSignatureRequired: ",join('|',@_),"\n";
+}
+sub EulaRequired {
+	my $self = shift;
+	my ($eula_id,$package_id,$vendor_name,$license_agreement) = @_;
+	print STDERR "EulaRequired: ",join('|',@_),"\n";
+}
+sub MediaChangeRequired {
+	my $self = shift;
+	my ($media_id,$media_text) = @_;
+	print STDERR "MediaChangeRequired: ",join('|',@_),"\n";
+}
+sub RequireRestart {
+	my $self = shift;
+	my ($type,$package_id) = @_;
+	print STDERR "RequireRestart: ",join('|',@_),"\n";
+}
+sub Transaction {
+	my $self = shift;
+	my ($old_tid,$timespec,$succeeded,$role,$duration,$data,$uid,$cmdline) = @_;
+	print STDERR "Transaction: ",join('|',@_),"\n";
+}
+sub UpdateDetail {
+	my $self = shift;
+	my ($package_id,$updates,$obsoletes,$vendor_url,$bugzilla_url,$cve_url,$restart,$update_text,$changelog,$state,$issued,$updated) = @_;
+	print STDERR "UpdateDetail: ",join('|',@_),"\n";
+}
+sub DistroUpgrade {
+	my $self = shift;
+	my ($type,$name,$summary) = @_;
+	print STDERR "DistroUpgrade: ",join('|',@_),"\n";
+}
+sub ItemProgress {
+	my $self = shift;
+	my ($id,$percentage) = @_;
+	print STDERR "ItemProgress: ",join('|',@_),"\n";
+}
+sub Changed {
+	my $self = shift;
+	print STDERR "Changed: ",join('|',@_),"\n";
+	$self->{my}{properties} = $self->GetAll("org.freedesktop.PackageKit.Transaction");
+	$self->dump;
+}
+sub Destroy {
+	my $self = shift;
+	print STDERR "Destroy: ",join('|',@_),"\n";
+	$self->destroy;
+}
+
+# methods:
+# SetHints ( ??? )
+# AcceptEula ( eula_id (s) )
+# Cancel ()
+# DownloadPackages ( store_in_cache (b), package_ids (as) )
+# GetCategories ()
+# GetDepends ( filter (s), package_ids (as), recursive (b) )
+# GetDetails ( package_ids (as) )
+# GetFiles ( package_ids (as) )
+# GetOldTransactions ( number (u) )
+# GetPackages ( filter (s) )
+# GetRepoList ( filter (s) )
+# GetRequires ( filter (s), package_ids (as), recursive (b) )
+# GetUpdateDetail ( package_ids (as) )
+# GetUpdates ( filter (s) )
+# GetDistroUpgrades ()
+# GetInstallFiles ( only_trusted (b), full_paths (as) )
+# InstallPackages ( only_trusted (b), package_ids (as) )
+# InstallSignature ( sig_type (s), key_id (s), package_id (s) )
+# RefreshCache ( force (b) )
+# RemovePackages ( package_ids (as), allow_deps (b), autoremove (b) )
+# RepoEnable ( repo_id (s), enabled (b) )
+# RepoSetData ( repo_id (s), parameter (s), value (s) )
+# Resolve ( filter (s), packages (as) )
+# Rollback ( transaction_id (s) )
+# SearchDetails ( filter (s), values (as) )
+# SearchFiles ( filter (s), values (as) )
+# SearchGroups ( filter (s), values (as) )
+# SearchNames ( filter (s), values (as) )
+# SimulateInstallFiles ( full_paths (as) )
+# SimulateInstallPackages ( package_ids (as) )
+# SimulateRemovePackages ( package_ids (as), autoremove (b) )
+# SimulateUpdatePackages ( package_ids (as) )
+# UpdatePackages ( only_trusted (b), package_ids (as) )
+# UpdateSystem ( only_trusted (b) )
+# WhatProvides ( filter (s), type (s), values (as) )
+# UpgradeSystem ( upgrade_kind (s) )
+# SimulateRepairSystem ()
+# RepairSystem ( only_trusted (b) )
+
+# -----------------------------------------------------------
+package Pk::Service;
+use base qw(Net::DBus::RemoteObject);
+use strict;
+
+our $service;
+
+sub new {
+	my $type = shift;
+	return $service if $service;
+	my $bus = Net::DBus::GLib->system;
+	my $srv = $bus->get_service("org.freedesktop.PackageKit");
+	my $self = $srv->get_object("/org/freedesktop/PackageKit");
+	bless $self,$type;
+	$self->{my}{bus} = $bus;
+	$self->{my}{srv} = $srv;
+	my $sigids = {};
+	$sigids->{TransactionListChanged}
+		= $self->connect_to_signal("TransactionListChanged",
+				sub{ $self->TransactionListChanged(@_); });
+	$sigids->{RestartSchedule}
+		= $self->connect_to_signal("RestartSchedule",
+				sub{ $self->RestartSchedule(@_); });
+	$sigids->{RepoListChanged}
+		= $self->connect_to_signal("RepoListChanged",
+				sub{ $self->RepoListChanged(@_); });
+	$sigids->{UpdatesChanged}
+		= $self->connect_to_signal("UpdatesChanged",
+				sub{ $self->UpdatesChanged(@_); });
+	$sigids->{Changed}
+		= $self->connect_to_signal("Changed",
+				sub{ $self->Changed(@_); });
+	$self->{my}{sigids} = $sigids;
+	$self->{my}{properties} = $self->GetAll("org.freedesktop.PackageKit");
+	$self->dump;
+	$service = $self;
+	return $self;
+}
+sub destroy {
+	my $self = shift;
+	while (my ($name,$sigid) = each %{$self->{my}{sigids}}) {
+		$self->disconnect_from_signal($name,$sigid);
+	}
+}
+sub dump {
+	my $self = shift;
+	my $props = $self->GetAll("org.freedesktop.PackageKit");
+	foreach my $key (sort keys %$props) {
+		my $val = $props->{$key};
+		if (ref($val) eq 'ARRAY') {
+			$val = join(',',@$val);
+		} elsif (ref($val) eq 'HASH') {
+			$val = join(';',map {$_."=".$val->{$_}} sort keys %$val);
+		}
+		print STDERR " ",$key," = ",$val,"\n";
+	}
+	print STDERR "\n";
+}
+
+sub TransactionListChanged {
+	my $self = shift;
+	my ($xacts) = @_;
+	print STDERR "TransactionListChanged: ",join(',',@_),"\n";
+	foreach my $xact (@$xacts) {
+		print STDERR "  xaction = ",$xact,"\n";
+	}
+}
+sub RestartSchedule {
+	my $self = shift;
+	print STDERR "RestartSchedule: ",join(',',@_),"\n";
+}
+sub RepoListChanged {
+	my $self = shift;
+	print STDERR "RepoListChanged: ",join(',',@_),"\n";
+}
+sub UpdatesChanged {
+	my $self = shift;
+	print STDERR "UpdatesChanged: ",join(',',@_),"\n";
+}
+sub Changed {
+	my $self = shift;
+	print STDERR "Changed: ",join(',',@_),"\n";
+	$self->{my}{properties} = $self->GetAll("org.freedesktop.PackageKit");
+	$self->dump;
+}
+# methods:
+# CanAuthorize( action_id (s) )
+# GetTid ()
+# GetTimeSinceAction ( role (s) )
+# GetTransactionList ()
+# StateHasChanged ( reason (s) )
+# SuggestDaemonQuit ()
+# GetDaemonState ()
+# SetProxy ( proxy_http (s), proxy_https(s), proxy_ftp(s), proxy_socks(s), no_proxy(s), pac(s) )
+# SetRoot ( root(s) )
+
+sub GetDepends {
+}
+sub GetDetails {
+	my $self = shift;
+	my ($package_ids) = @_;
+	my $xact = Pk::Transaction->new($self);
+	$xact->GetDetails(@_);
+}
+sub GetFiles {
+}
+sub GetPackages {
+	my $self = shift;
+	my ($filter) = @_;
+	my $xact = Pk::Transaction->new($self);
+	$xact->GetPackages(@_);
+}
+sub GetRepoList {
+	my $self = shift;
+	my ($filter) = @_;
+	my $xact = Pk::Transaction->new($self);
+	$xact->GetRepoList(@_);
+}
+sub GetRequires {
+}
+sub GetUpdateDetail {
+}
+sub GetUpdates {
+	my $self = shift;
+	my ($filter) = @_;
+	my $xact = Pk::Transaction->new($self);
+	$xact->GetUpdates(@_);
+}
+sub InstallFiles {
+}
+sub InstallPackages {
+}
+sub RefreshCache {
+	my $self = shift;
+	my $xact = Pk::Transaction->new($self);
+	$xact->RefreshCache(@_);
+}
+sub RemovePackages {
+}
+sub RepoEnable {
+}
+sub Resolve {
+}
+sub SearchDetails {
+}
+sub SearchFile {
+}
+sub SearchGroup {
+}
+sub SearchName {
+}
+sub UpdatePackages {
+}
+sub WhatProvides {
+}
+sub DownloadPackages {
+}
+sub SimulateInstallFiles {
+}
+sub SimulateInstallPackages {
+}
+sub SimulateRemovePackages {
+}
+sub SimulateUpdatePackages {
+}
+
+
+# -----------------------------------------------------------
+package Pk::Notify;
+use base qw(Gtk2::Notify);
+use strict;
+
+sub new {
+	my ($type,$icon) = @_;
+	my $self = Gtk2::Notify->new("Pk","Pk notification","gtk-connect");
+	$self->signal_connect_swapped('closed'=>\&Pk::Notify::closed,$self);
+	bless $self,$type;
+	$self->{my}{state} = 0;
+	$self->show;
+	return $self;
+}
+sub closed {
+	my ($self,$notify) = @_;
+	$self->{my}{state} = 0;
+	return Gtk2::EVENT_PROPAGATE;
+}
+
+# -----------------------------------------------------------
+package Pk::Icon;
+use base qw(Gtk2::StatusIcon);
+use strict;
+
+sub new {
+	my $type = shift;
+	my $self = Gtk2::StatusIcon->new_from_stock('gtk-connect');
+	$self->{my}{notify} = Pk::Notify->new($self);
+	$self->set_tooltip_text('Pk applet.');
+	$self->set_visible(1);
+	$self->signal_connect_swapped('button-press-event'=>
+			\&Pk::Icon::button_press_event,$self);
+	$self->signal_connect_swapped('button-release-event'=>
+			\&Pk::Icon::button_release_event,$self);
+	$self->signal_connect_swapped('scroll-event'=>
+			\&Pk::Icon::scroll_event,$self);
+	$self->signal_connect_swapped('query-tooltip'=>
+			\&Pk::Icon::query_tooltip,$self);
+	$self->signal_connect_swapped('popup-menu'=>
+			\&Pk::Icon::popup_menu,$self);
+	$self->signal_connect_swapped('activate'=>
+			\&Pk::Icon::activate,$self);
+	$self->signal_connect_swapped('size-changed'=>
+			\&Pk::Icon::size_changed,$self);
+	bless $self,$type;
+	return $self;
+}
+sub button_press_event {
+	my ($self,$event,$icon) = @_;
+#print STDERR "button-press-event: ",join(', ',@_),"\n";
+#print STDERR "Button pressed!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub button_release_event {
+	my ($self,$event,$icon) = @_;
+#print STDERR "button-release-event: ",join(', ',@_),"\n";
+#print STDERR "Button released!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub scroll_event {
+	my ($self,$event,$icon) = @_;
+#print STDERR "scroll-event: ",join(', ',@_),"\n";
+#print STDERR "Scroll!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub query_tooltip {
+	my ($self,$x,$y,$bool,$tooltip,$icon) = @_;
+print STDERR "query-tooltip: ",join(', ',@_),"\n";
+print STDERR "Tooltip query!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub popup_menu {
+	my ($self,$button,$time,$icon) = @_;
+	print STDERR "popup-menu: ",join(', ',@_),"\n";
+	print STDERR "Popup menu!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub activate {
+	my ($self,$icon) = @_;
+	print STDERR "activate: ",join(', ',@_),"\n";
+	print STDERR "Activated!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub size_changed {
+	my ($self,$pixels,$icon) = @_;
+#print STDERR "size-changed: ",join(', ',@_),"\n";
+#print STDERR "Size changed to $pixels!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+
+# -----------------------------------------------------------
+package Pk::Applet;
+use strict;
+
+our $applet;
+
+sub init {
+	my $type = shift;
+	return if $applet;
+	$applet = bless {
+		icon=>Pk::Icon->new,
+		manager=>Pk::Service->new,
+	}, $type;
+	return;
+}
+
+# -----------------------------------------------------------
+package main;
+use strict;
+
+Pk::Applet->init;
+
+#$Pk::Applet::applet->{manager}->GetPackages('none');
+$Pk::Applet::applet->{manager}->GetRepoList('none');
+$Pk::Applet::applet->{manager}->RefreshCache(undef);
+$Pk::Applet::applet->{manager}->GetUpdates('none');
+#$Pk::Applet::applet->{manager}->GetDetails([]);
+
+Gtk2->main;
+

@@ -1,0 +1,2647 @@
+#!/usr/bin/perl
+
+use Glib qw(TRUE FALSE);
+use Gtk2;
+use Gtk2::Notify;
+use Gtk2::Unique;
+use Gtk2::Ex::ListModelConcat;
+use Net::DBus;
+use Net::DBus::GLib;
+use ALPM;
+
+Gtk2->init;
+Gtk2::Notify->init("pk-applet");
+
+# -----------------------------------------------------------
+package Pk;
+use strict;
+
+use constant {
+	# for updates info should be (blocked|low|normal|important|security)
+	PKG_COLUMN_ID		=> 0, # package
+	PKG_COLUMN_INFO		=> 1, # package
+	PKG_COLUMN_NAME		=> 2, # package
+	PKG_COLUMN_VERSION	=> 3, # package
+	PKG_COLUMN_ARCH		=> 4, # package
+	PKG_COLUMN_SOURCE	=> 5, # package
+	PKG_COLUMN_SUMMARY	=> 6, # package
+	PKG_COLUMN_LICENSE	=> 7, # package detail
+	PKG_COLUMN_GROUP	=> 8, # package detail
+	PKG_COLUMN_DETAIL	=> 9, # package detail
+	PKG_COLUMN_URL		=>10, # package detail
+	PKG_COLUMN_SIZE		=>11, # package detail
+	PKG_COLUMN_MEMBER	=>12, # alpm
+	PKG_COLUMN_SHORT_FORM	=>13, # short formatted markup
+	PKG_COLUMN_UPDATES	=>14, # update detail
+	PKG_COLUMN_OBSOLETES	=>15, # update detail
+	PKG_COLUMN_VENDOR_URL	=>16, # update detail
+	PKG_COLUMN_BUGZILLA_URL	=>17, # update detail
+	PKG_COLUMN_CVE_URL	=>18, # update detail
+	PKG_COLUMN_RESTART	=>19, # update detail
+	PKG_COLUMN_UPDATE_TEXT	=>20, # update detail
+	PKG_COLUMN_CHANGELOG	=>21, # update detail
+	PKG_COLUMN_STATE	=>22, # update detail
+	PKG_COLUMN_ISSUED	=>23, # update detail
+	PKG_COLUMN_UPDATED	=>24, # update detail
+};
+
+use constant {
+	REPO_COLUMN_ID		=> 0, # repo detail
+	REPO_COLUMN_DESCRIP	=> 1, # repo detail
+	REPO_COLUMN_ENABLED	=> 2, # repo detail
+};
+
+# -----------------------------------------------------------
+package Pk::Transaction;
+use base qw(Net::DBus::RemoteObject);
+use strict;
+
+sub new {
+	my ($type,$window,$pkit) = @_;
+	my $self = $pkit->get_service->get_object($pkit->GetTid);
+	$self->{sigids}{Category}
+		= $self->connect_to_signal("Category",
+			sub{ $window->Category($self,@_); });
+	$self->{sigids}{Details}
+		= $self->connect_to_signal("Details",
+			sub{ $window->Details($self,@_); });
+	$self->{sigids}{ErrorCode}
+		= $self->connect_to_signal("ErrorCode",
+			sub{ $window->ErrorCode($self,@_); });
+	$self->{sigids}{Files}
+		= $self->connect_to_signal("Files",
+			sub{ $window->Files($self,@_); });
+	$self->{sigids}{Finished}
+		= $self->connect_to_signal("Finished",
+			sub{ $window->Finished($self,@_); });
+	$self->{sigids}{Message}
+		= $self->connect_to_signal("Message",
+			sub{ $window->Message($self,@_); });
+	$self->{sigids}{Package}
+		= $self->connect_to_signal("Package",
+			sub{ $window->Package($self,@_); });
+	$self->{sigids}{RepoDetail}
+		= $self->connect_to_signal("RepoDetail",
+			sub{ $window->RepoDetail($self,@_); });
+	$self->{sigids}{RepoSignatureRequired}
+		= $self->connect_to_signal("RepoSignatureRequired",
+			sub{ $window->RepoSignatureRequired($self,@_); });
+	$self->{sigids}{EulaRequired}
+		= $self->connect_to_signal("EulaRequired",
+			sub{ $window->EulaRequired($self,@_); });
+	$self->{sigids}{MediaChangeRequired}
+		= $self->connect_to_signal("MediaChangeRequired",
+			sub{ $window->MediaChangeRequired($self,@_); });
+	$self->{sigids}{RequireRestart}
+		= $self->connect_to_signal("RequireRestart",
+			sub{ $window->RequireRestart($self,@_); });
+	$self->{sigids}{Transaction}
+		= $self->connect_to_signal("Transaction",
+			sub{ $window->Transaction($self,@_); });
+	$self->{sigids}{UpdateDetail}
+		= $self->connect_to_signal("UpdateDetail",
+			sub{ $window->UpdateDetail($self,@_); });
+	$self->{sigids}{DistroUpgrade}
+		= $self->connect_to_signal("DistroUpgrade",
+			sub{ $window->DistroUpgrade($self,@_); });
+	$self->{sigids}{ItemProgress}
+		= $self->connect_to_signal("ItemProgress",
+			sub{ $window->ItemProgress($self,@_); });
+	$self->{sigids}{Changed}
+		= $self->connect_to_signal("Changed",
+			sub{ $window->XactChanged($self,@_); });
+	$self->{sigids}{Destroy}
+		= $self->connect_to_signal("Destroy",
+			sub{ $window->Destroy($self,@_); });
+	bless $self,$type;
+	return $self;
+}
+sub destroy {
+	my $self = shift;
+	while (my ($name,$sigid) = each %{$self->{sigids}}) {
+		$self->disconnect_from_signal($name,$sigid);
+	}
+}
+
+# -----------------------------------------------------------
+package Pk::Manager;
+use base qw(Net::DBus::RemoteObject);
+use strict;
+
+sub new {
+	my ($type,$window) = @_;
+	my $srv = Net::DBus::GLib->system->get_service("org.freedesktop.PackageKit");
+	my $self = $srv->get_object("/org/freedesktop/PackageKit");
+	$self->{sigids}{TransactionListChanged}
+		= $self->connect_to_signal("TransactionListChanged",
+			sub{ $window->TransactionListChanged($self,@_); });
+	$self->{sigids}{RestartSchedule}
+		= $self->connect_to_signal("RestartSchedule",
+			sub{ $window->RestartSchedule($self,@_); });
+	$self->{sigids}{RepoListChanged}
+		= $self->connect_to_signal("RepoListChanged",
+			sub{ $window->RepoListChanged($self,@_); });
+	$self->{sigids}{UpdatesChanged}
+		= $self->connect_to_signal("UpdatesChanged",
+			sub{ $window->UpdatesChanged($self,@_); });
+	$self->{sigids}{Changed}
+		= $self->connect_to_signal("Changed",
+			sub{ $window->PkitChanged($self,@_); });
+	bless $self,$type;
+	return $self;
+}
+sub destroy {
+	my $self = shift;
+	while (my ($name,$sigid) = each %{$self->{sigids}}) {
+		$self->disconnect_from_signal($name,$sigid);
+	}
+}
+
+# -----------------------------------------------------------
+package Pk::PackageDetail;
+use base qw(Gtk2::Window);
+use Glib qw(TRUE FALSE);
+use strict;
+
+our $packageDetail;
+
+sub get {
+	return $packageDetail if $packageDetail;
+	return new Pk::PackageDetail;
+}
+sub add_list_column {
+	my ($view,$label,$id,$sort) = @_;
+	my $renderer = Gtk2::CellRendererText->new;
+	my $column = Gtk2::TreeViewColumn->new_with_attributes(
+		$label,$renderer,text=>$id);
+	$column->set_sort_column_id($id) if $sort;
+	$view->append_column($column);
+}
+sub new {
+	my $self = bless Gtk2::Window->new('toplevel'), shift;
+	$self->set_wmclass('pkPackageDetail','PkApplet');
+	$self->set_title('Package Detail');
+	$self->set_gravity('center');
+	$self->set_icon_name('system-software-install');
+	$self->signal_connect(destroy=>sub{$packageDetail=undef; 1});
+	$self->set_border_width(8);
+
+	my $vbox = Gtk2::VBox->new(FALSE,8);
+	$self->add($vbox);
+
+	my $sw = Gtk2::ScrolledWindow->new;
+	$sw->set_shadow_type('etched-in');
+	$sw->set_policy('never','automatic');
+	$vbox->pack_start($sw,TRUE,TRUE,0);
+
+	my $model = Gtk2::ListStore->new(
+		'Glib::String',
+		'Glib::String',
+	);
+	$self->{store} = $model;
+
+	my $view = Gtk2::TreeView->new($model);
+	$view->set_rules_hint(TRUE);
+	$view->set_search_column(0);
+#	$view->set_hover_expand(1);
+	$sw->add($view);
+	$self->{view} = $view;
+
+	my @columns = (
+		['Detail',	0,	1],
+		['Value',	1,	1],
+	);
+
+	foreach my $col (@columns) { add_list_column($view,@$col); }
+
+	$self->set_default_size(-1,400);
+	$self->show_all;
+
+	$packageDetail = $self;
+	return $self;
+}
+use constant {
+	Label=>{
+		&Pk::PKG_COLUMN_ID		=>'Id',
+		&Pk::PKG_COLUMN_INFO		=>'Information',
+		&Pk::PKG_COLUMN_NAME		=>'Name',
+		&Pk::PKG_COLUMN_VERSION		=>'Version',
+		&Pk::PKG_COLUMN_ARCH		=>'Architecture',
+		&Pk::PKG_COLUMN_SOURCE		=>'Repository',
+		&Pk::PKG_COLUMN_SUMMARY		=>'Summary',
+		&Pk::PKG_COLUMN_LICENSE		=>'License',
+		&Pk::PKG_COLUMN_GROUP		=>'Group',
+		&Pk::PKG_COLUMN_DETAIL		=>'Detail',
+		&Pk::PKG_COLUMN_URL		=>'URL',
+		&Pk::PKG_COLUMN_SIZE		=>'Size',
+		&Pk::PKG_COLUMN_MEMBER		=>'Member',
+		&Pk::PKG_COLUMN_UPDATES		=>'Updates',
+		&Pk::PKG_COLUMN_OBSOLETES	=>'Obsoletes',
+		&Pk::PKG_COLUMN_VENDOR_URL	=>'Vendor URL',
+		&Pk::PKG_COLUMN_BUGZILLA_URL	=>'Bugs URL',
+		&Pk::PKG_COLUMN_CVE_URL		=>'CVE URL',
+		&Pk::PKG_COLUMN_RESTART		=>'Restart',
+		&Pk::PKG_COLUMN_UPDATE_TEXT	=>'Update Text',
+		&Pk::PKG_COLUMN_CHANGELOG	=>'Change Log',
+		&Pk::PKG_COLUMN_STATE		=>'State',
+		&Pk::PKG_COLUMN_ISSUED		=>'Issued',
+		&Pk::PKG_COLUMN_UPDATED		=>'Updated',
+	},
+	Mapping=>[
+		[package_id	=>&Pk::PKG_COLUMN_ID],
+		[info=>		=>&Pk::PKG_COLUMN_INFO],
+		[name=>		=>&Pk::PKG_COLUMN_NAME],
+		[version=>	=>&Pk::PKG_COLUMN_VERSION],
+		[arch=>		=>&Pk::PKG_COLUMN_ARCH],
+		[source=>	=>&Pk::PKG_COLUMN_SOURCE],
+		[summary=>	=>&Pk::PKG_COLUMN_SUMMARY],
+		[license=>	=>&Pk::PKG_COLUMN_LICENSE],
+		[group=>	=>&Pk::PKG_COLUMN_GROUP],
+		[url=>		=>&Pk::PKG_COLUMN_URL],
+		[size=>		=>&Pk::PKG_COLUMN_SIZE],
+		[member=>	=>&Pk::PKG_COLUMN_MEMBER],
+		[updates=>	=>&Pk::PKG_COLUMN_UPDATES],
+		[obsoletes=>	=>&Pk::PKG_COLUMN_OBSOLETES],
+		[vendor_url=>	=>&Pk::PKG_COLUMN_VENDOR_URL],
+		[bugzilla_url=>	=>&Pk::PKG_COLUMN_BUGZILLA_URL],
+		[cve_url=>	=>&Pk::PKG_COLUMN_CVE_URL],
+		[restart=>	=>&Pk::PKG_COLUMN_RESTART],
+		[update_text=>	=>&Pk::PKG_COLUMN_UPDATE_TEXT],
+		[changelog=>	=>&Pk::PKG_COLUMN_CHANGELOG],
+		[state=>	=>&Pk::PKG_COLUMN_STATE],
+		[issued=>	=>&Pk::PKG_COLUMN_ISSUED],
+		[updated=>	=>&Pk::PKG_COLUMN_UPDATED],
+	],
+};
+sub show_props {
+	my ($self,$selection) = @_;
+	my ($model,$iter) = $selection->get_selected;
+	return unless $model;
+	my $id = $model->Gtk2::TreeModel::get($iter,&Pk::PKG_COLUMN_ID);
+	my $pkg = $model->{objects}{$id};
+	return unless $pkg;
+	my $store = $self->{store};
+	$store->clear;
+	foreach my $pair (@{&Mapping}) {
+		my ($key,$col) = @$pair;
+		my $label = &Label->{$col};
+		next unless exists $pkg->{$key};
+		my $iter = $store->append;
+		my $val = $pkg->{$key};
+		$val =~ s/;/\n/g
+			unless $key =~ /^(package_id|updates|obsoletes)$/;
+		$store->set($iter,
+			0,	$label,
+			1,	$val,
+		);
+	}
+	if (ref($model) eq 'Pk::PackageModel') {
+		$self->set_screen(Pk::PackageWindow->get->get_screen);
+	}
+	if (ref($model) eq 'Pk::UpdateModel') {
+		$self->set_screen(Pk::UpdateWindow->get->get_screen);
+	}
+	$self->deiconify;
+	$self->show;
+}
+
+# -----------------------------------------------------------
+package Pk::RepoModel;
+use base qw(Gtk2::ListStore);
+use strict;
+
+our $repoModel;
+
+sub get {
+	return $repoModel if $repoModel;
+	return new Pk::RepoModel;
+}
+sub new {
+	$repoModel = bless Gtk2::ListStore->new(
+		'Glib::String',	# repo_id
+		'Glib::String', # description
+		'Glib::String', # enabled
+	), shift;
+	return $repoModel;
+}
+
+# -----------------------------------------------------------
+package Pk::Repo;
+use File::stat;
+use strict;
+
+our %list = ();
+our %info = ();
+our $store = Gtk2::ListStore->new('Glib::String','Glib::String','Glib::String');
+
+sub read_repo {
+	my $self = shift;
+	my $name = $self->{repo_id};
+	my $base = $self->{file};
+	my $cmd1 = "tar tzf  $base --ignore-failed-read --wildcards --no-wildcards-match-slash '*/desc' '*/files' '*/depends' '*/deltas' 2>/dev/null |";
+	my $cmd2 = "tar xzOf $base --ignore-failed-read --wildcards --no-wildcards-match-slash '*/desc' '*/files' '*/depends' '*/deltas' 2>/dev/null |";
+	my $pkgs = {};
+	open (my $fh1,$cmd1) or return $pkgs;
+	open (my $fh2,$cmd2) or return $pkgs;
+	my ($modechange,$file,$pkg,$id,$mode,$state,$data) = (1);
+	DSTANZA:
+	while (<$fh2>) { chop;
+		if (/^%([A-Z][A-Z0-9]*)%/) {
+			my $tag = "\L$1\E";
+			if ($modechange) {
+				MODECHANGE:
+				$file = <$fh1>;
+				last DSTANZA unless defined $file;
+				chop $file;
+				($pkg,$mode) = split(/\//,$file);
+				$pkg =~ /^(.*)-([^-]*-[^-]*)$/;
+				$id = "$1;$2";
+				$pkgs->{$id} = {} unless exists $pkgs->{$id};
+				$data = $pkgs->{$id};
+				$state = undef;
+				$modechange = undef;
+			}
+			RESTART:
+			if ($state) {
+				if ($mode eq 'desc') {
+					if ($tag =~ /^(filename|depends|conflicts|provides|optdepends|files|deltas)$/) {
+						goto MODECHANGE;
+					}
+				}
+				elsif ($mode eq 'depends') {
+					unless ($tag =~ /^(conflicts|provides|optdepends)$/) {
+						goto MODECHANGE;
+					}
+					if ($state eq 'depends') {
+						unless ($tag =~ /^(conflicts|provides|optdepends)$/) {
+							goto MODECHANGE;
+						}
+					}
+					elsif ($state eq 'conflicts') {
+						unless ($tag =~ /^(provides|optdepends)$/) {
+							goto MODECHANGE;
+						}
+					}
+					elsif ($state eq 'provides') {
+						unless ($tag =~ /^(optdepends)$/) {
+							goto MODECHANGE;
+						}
+					}
+					elsif ($state eq 'optdepends') {
+						goto MODECHANGE;
+					}
+					$state = $tag;
+				}
+				else {
+					goto MODECHANGE;
+				}
+			} else {
+				if ($mode eq 'desc') {
+					unless ($tag eq 'filename') {
+						print STDERR "Lost sync! mode=$mode, tag=$tag, file=$file, id=$id\n";
+						last DSTANZA;
+					}
+				}
+				elsif ($mode eq 'depends') {
+					unless ($tag =~ /^(depends|conflicts|optdepends|provides)$/) {
+						goto MODECHANGE;
+					}
+				}
+				elsif ($mode ne $tag) {
+					goto MODECHANGE;
+				}
+				$state = $tag;
+			}
+			$data->{$tag} = [] unless exists $data->{$tag};
+			while (<$fh2>) { chop;
+				if (/^\s*$/) {
+				next DSTANZA;
+				}
+				if (/^%([A-Z][A-Z0-9]*)%/) {
+					$tag = "\L$1\E";
+					goto RESTART;
+				}
+				push @{$data->{$tag}}, $_;
+			}
+		}
+		elsif (/^\s*$/) {
+			next;
+		}
+		else {
+			print STDERR "Garbage in input stream! '$_' mode=$mode state=$state\n";
+			next;
+		}
+	}
+	close($fh2);
+	close($fh1);
+	return $pkgs;
+}
+
+sub make_pkgs {
+	my ($self,$pkgs) = @_;
+	my $db = $self->{repo_id};
+	foreach my $namver (sort keys %$pkgs) {
+		my $hash = $pkgs->{$namver};
+		my ($name,$version) = split(/;/,$namver);
+		$hash->{db} = $db;
+		$hash->{repo} = $db;
+		my $arch = $hash->{arch};
+		my $source = $db;
+		$source = 'installed' if $db eq 'local';
+		$hash->{source} = $source;
+		my $id = "$name;$version;$arch;$source";
+		$hash->{id} = $id;
+		$hash->{package_id} = $id;
+		my $summary = $hash->{desc};
+		$summary = substr($summary,0,80).'...' if length($summary) > 83;
+		$hash->{summary} = $summary;
+		my $info = $db eq 'local' ? 'installed' : 'available';
+		$hash->{info} = $info;
+		for (keys %$hash) {
+			if (ref $hash->{$_} eq 'ARRAY') {
+				$hash->{$_} = join(';',@{$hash->{$_}});
+			}
+		}
+		bless $hash,$type;
+		$list{$id} = $hash;
+		$list{$name}{$version}{$arch}{$source} = $hash;
+		$self->{pkgs}{$id} = 1;
+	}
+}
+
+#
+# Perform initialization of each of the pacman sync databases.
+#
+sub init {
+	my $type = shift;
+	my @dbs = map{chomp;$_} `find /var/lib/pacman/sync -type f -name '*.db' 2>/dev/null`;
+	for (@dbs) {
+		my $name = $_; $name =~ s/^.*\///; $name =~ s/\.db$//;
+		$list{$name} = $type->new($name);
+	}
+}
+
+sub new {
+	my ($type,$name) = @_;
+	my $self = bless {
+		repo_id=>$name,
+		descrip=>"[$name]",
+		enabled=>1,
+	},$type;
+	my $file =  "/var/lib/pacman/${name}.db";
+	$self->{file} = $file;
+	$self->{stat} = stat($file);
+	# A packages list store to concatenate when repo selected
+	$self->{model} = Gtk2::ListStore->new('Glib::String');
+	my $iter = $store->append;
+	$self->{path} = $store->get_path($iter)->to_string();
+	$store->set($store->append,
+		0, $self->{repo_id},
+		1, $self->{descrip},
+		2, $self->{enabled},
+	);
+	my $pkgs = $self->read_repo();
+	$self->make_pkgs($pkgs);
+	return $self;
+}
+
+sub DESTROY {
+	my $self = shift;
+	my $path = Gtk2::TreePath->new_from_string($self->{path});
+	my $iter = $store->get_iter($path);
+	$store->remove($iter);
+}
+
+sub add_pkg {
+	my ($self,$pkg) = @_;
+	unless (exists $self->{pkgs}{$pkg}) {
+		$self->{pkgs}{$pkg} = 1;
+		my $model = $self->{model};
+		$model->set($model->append,0,$pkg);
+	}
+}
+sub del_pkg {
+	my ($self,$pkg) = @_;
+	if (delete $self->{pkgs}{$pkg}) {
+		my $model = $self->{model};
+		for (my $iter = $model->get_iter_first();
+			$iter;
+			$iter = $model->iter_next($iter))
+		{
+			if ($model->get($iter,0) eq $pkg) {
+				$model->remove($iter);
+				last;
+			}
+		}
+	}
+}
+
+# -----------------------------------------------------------
+package Pk::Repo::Local;
+use base qw(Pk::Repo);
+use strict;
+
+sub read_repo {
+	my $self = shift;
+	my $pkgs = {};
+	my @files = map{chomp;$_} `find /var/lib/pacman/local -type f -name desc -o -name files 2>/dev/null`;
+	foreach my $file (@files) {
+		open (my $fh, "<$file") or return $pkgs;
+		my @parts = split(/\//,$file);
+		my ($pkg,$mode) = ($parts[-2],$parts[-1]);
+		$pkg =~ /^(.*)-([^-]*-[^-]*)$/;
+		my $id = "$1;$2";
+		$pkgs->{$id} = {} unless exists $pkgs->{$id};
+		my $data = $pkgs->{$id};
+	LSTANZA:
+		while (<$fh>) { chop;
+			if (/^%([A-Z][A-Z0-9]*)%/) {
+				my $tag = "\L$1\E";
+				$data->{$tag} = [] unless exists $data->{$tag};
+				while (<$fh>) { chop;
+					next LSTANZA if /^\s*$/;
+					push @{$data->{$tag}}, $_;
+				}
+				print STDERR "Unexpeced end of input!\n";
+			}
+			elsif (/^\s*$/) {
+				next;
+			}
+			else {
+				print STDERR "Garbage in input stream!\n";
+			}
+		}
+		close($fh);
+	}
+	return $pkgs;
+}
+
+sub init {
+	my $type = shift;
+	$list{local} = $type->new('local');
+}
+
+# -----------------------------------------------------------
+package Pk::RepoWindow;
+use base qw(Gtk2::Window);
+use Glib qw(TRUE FALSE);
+use strict;
+
+our $repoWindow;
+
+sub get {
+	return $repoWindow if $repoWindow;
+	return new Pk::RepoWindow;
+}
+
+sub add_list_column {
+	my ($view,$label,$id,$sort) = @_;
+	my $renderer = Gtk2::CellRendererText->new;
+	my $column = Gtk2::TreeViewColumn->new_with_attributes(
+		$label,$renderer,text=>$id);
+	$column->set_sort_column_id($id) if $sort;
+	$view->append_column($column);
+}
+
+sub new {
+	my $self = bless Gtk2::Window->new('toplevel'), shift;
+	$self->set_wmclass('pkRepos','PkApplet');
+	$self->set_title('Repositories');
+	$self->set_gravity('center');
+	$self->set_position('center');
+	$self->set_icon_name('system-file-manager');
+	$self->signal_connect(destroy=>sub{$repoWindow = undef; 1 });
+	$self->set_border_width(8);
+
+	my $vbox = Gtk2::VBox->new(FALSE,8);
+	$self->add($vbox);
+
+	my $sw = Gtk2::ScrolledWindow->new;
+	$sw->set_shadow_type('etched-in');
+	$sw->set_policy('never','automatic');
+	$vbox->pack_start($sw,TRUE,TRUE,0);
+
+	my $view = Gtk2::TreeView->new($Pk::Repo::store);
+	$view->set_rules_hint(TRUE);
+	$view->set_search_column(&Pk::REPO_COLUMN_ID);
+	$sw->add($view);
+
+	my @columns = (
+		['Id',		&Pk::REPO_COLUMN_ID,		1],
+		['Descrip',	&Pk::REPO_COLUMN_DESCRIP,	1],
+		['Enabled',	&Pk::REPO_COLUMN_ENABLED,	1],
+	);
+
+	foreach my $col (@columns) { add_list_column($view,@$col); }
+
+	$self->set_default_size(-1,150);
+	$self->show_all;
+
+	$repoWindow = $self;
+	return $self;
+}
+
+# -----------------------------------------------------------
+package Pk::PackageModel;
+use base qw(Gtk2::ListStore);
+use strict;
+
+our $packageModel;
+
+sub get {
+	return $packageModel if $packageModel;
+	return new Pk::PackageModel;
+}
+sub new {
+	$packageModel = bless Gtk2::ListStore->new(
+		'Glib::String', # id
+		'Glib::String', # info
+		'Glib::String', # name
+		'Glib::String', # version
+		'Glib::String', # arch
+		'Glib::String', # source
+		'Glib::String', # summary
+		'Glib::String', # license
+		'Glib::String', # group
+		'Glib::String', # detail
+		'Glib::String', # url
+		'Glib::Int', # size
+		'Glib::String', # member
+		'Glib::String', # short format
+	), shift;
+	return $packageModel;
+}
+
+# -----------------------------------------------------------
+package Pk::Category;
+use strict;
+# -----------------------------------------------------------
+# Categories correspond to pkit groups.  These are the rather basic set shown
+# below.  A Pk:Category object maintains a list of references to package group
+# objects that belong to the category.  Also, each category is display in the
+# sidebar on the package window.  This list can be obtained from the 'Groups'
+# property of the PackageKit manager.
+
+use constant {
+	Categories=>[
+		'desktop-gnome',
+		'desktop-kde',
+		'desktop-other',
+		'desktop-xfce',
+		'multimedia',
+		'other',
+		'programming',
+		'system',
+	],
+};
+
+# The file /etc/PackageKit/alpm.d/groups.list provides a mapping from Archlinux
+# group names to their superior PackageKit category.
+
+our %mapping = ();
+our %list = ();
+our $store = Gtk2::TreeStore->new('Glib::String','Glib::String');
+
+#
+# The /etc/PackageKit/alpm.d/groups.list file contains the mapping from pacman
+# groups into PackageKit groups.  Each line contains a pacman package group with
+# whitespace and then the corresponding PackageKit group.  Anything that doesn't
+# fit into here is likely just mapped to 'other'.  So we can actually use a
+# tree-store for the categories and groups.
+#
+sub init {
+	my $type = shift;
+	if (open(my $fh, '<', '/etc/PackageKit/alpm.d/groups.list')) {
+		while (<$fh>) { chop;
+			my ($grp,$cat) = split(/\s+/,$_,2);
+			$mapping{$grp} = $cat;
+			$list{$cat} = $type->new($cat)
+				unless exists $list{$cat}
+					  and $list{$cat};
+		}
+		close($fh);
+	}
+	return \%list;
+}
+sub category {
+	my $grp = shift;
+	return 'other' unless $grp;
+	return $mapping{$grp}
+		if exists $mapping{$grp}
+		      and $mapping{$grp};
+	return 'other';
+}
+sub ins_pkg {
+	my $pkg = shift;
+	my $grp = $pkg->{group};
+	my $cat = category($grp);
+	$pkg->{category} = $cat;
+	$categories{$cat} = new Pk::Category($cat)
+		unless exists $categories{$cat}
+			  and $categories{$cat};
+	$cat = $categories{$cat};
+	$cat->add_grp($grp);
+	$cat->add_pkg($pkg);
+}
+sub rem_pkg {
+	my $pkg = shift;
+}
+sub new {
+	my ($type,$cat) = @_;
+	my $self = bless {
+		category=>$cat,
+		grps=>{},
+		pkgs=>{},
+	}, $type;
+	# A package list store to concatenate when repo selected
+	$self->{model} = Gtk2::ListStore->new('Glib::String');
+	my $iter = $store->append;
+	$self->{path} = $store->get_path($iter)->to_string();
+	$store->get($store->append,
+		0, $self->{category},
+		1, undef,
+	);
+	return $self;
+}
+sub DESTROY {
+	my $self = shift;
+	my $cat = $self->{category};
+	delete $list{$cat};
+	for (my $iter = $store->get_iter_first();
+		$iter;
+		$iter = $store->iter_next($iter))
+	{
+		if ($store->get($iter,0) eq $cat) {
+			$store->remove($iter);
+			last;
+		}
+	}
+}
+
+
+sub add_grp {
+	my ($self,$grp) = @_;
+	$self->{grps}{$grp}++;
+}
+sub del_grp {
+	my ($self,$grp) = @_;
+	$self->{grps}{$grp}--;
+	delete $self->{grps}{$grp} if $self->{grps}{$grp} <= 0;
+}
+sub add_pkg {
+	my ($self,$pkg) = @_;
+	unless (exists $self->{pkgs}{$pkg}) {
+		$self->{pkgs}{$pkg} = 1;
+		my $model = $self->{model};
+		$model->set($model->append,0,$pkg);
+	}
+}
+sub del_pkg {
+	my ($self,$pkg) = @_;
+	if (delete $self->{pkgs}{$pkg}) {
+		my $model = $self->{model};
+		for (my $iter = $model->get_iter_first();
+			$iter;
+			$iter = $model->iter_next($iter))
+		{
+			if ($model->get($iter,0) eq $pkg) {
+				$model->remove($iter);
+				last;
+			}
+		}
+	}
+}
+sub grps {
+	my $self = shift;
+	return [sort keys %{$self->{grps}}];
+}
+sub pkgs {
+	my $self = shift;
+	return [sort keys %{$self->{pkgs}}];
+}
+
+# -----------------------------------------------------------
+package Pk::Group;
+use strict;
+# -----------------------------------------------------------
+# Groups belong to Archlinux groups.  These are groups of packages.  There are
+# lots of them and they are loosely defined.  Groups do map to the larger
+# categories above, so we might want to do a tree model on the sidebar.
+
+
+our %mapping = ();
+our %groups = ();
+our %list = ();
+
+#
+# We get groups as a result of parsing the local and sync databases; however, we
+# can get them from pacman very quickly with the following code.  The mapping is
+# for quickly finding what group a package belongs to, even though it is one of
+# the data points.
+#
+sub init {
+	my $type = shift;
+	if (open(my $fh, "(pacman -Qg; pacman -Sg) |")) {
+		while (<$fh>) { chop;
+			my ($grp,$pkg) = split(/\s+/,$_);
+			next unless defined $grp and $grp;
+			$groups{$grp} = new($type,$grp)
+				unless exists $groups{$grp}
+					  and $groups{$grp};
+			next unless defined $pkg and $pkg;
+			$mapping{$pkg} = $grp;
+			$groups{$grp}->add_pkg($pkg);
+		}
+		close($fh);
+	}
+}
+sub ins_pkg {
+	my $pkg = shift;
+	Pk::Category::ins_pkg($pkg);
+}
+sub rem_pkg {
+	my $pkg = shift;
+	Pk::Category::rem_pkg($pkg);
+}
+sub group {
+	my ($type,$pkg) = @_;
+	return '' unless $pkg;
+	return $mapping{$pkg}
+		if exists $mapping{$pkg}
+		      and $mapping{$pkg};
+	return '';
+}
+
+sub new {
+	my $self = bless {}, shift;
+	$self->{group} = shift;
+	$self->{pkgs} = {};
+	return $self;
+}
+sub add_pkg {
+	my ($self,$pkg) = @_;
+	$self->{pkgs}{$pkg} = 1;
+}
+sub del_pkg {
+	my ($self,$pkg) = @_;
+	delete $self->{pkgs}{$pkg};
+}
+sub pkgs {
+	my $self = shift;
+	return [sort keys %{$self->{pkgs}}];
+}
+
+# -----------------------------------------------------------
+package Pk::Base;
+use strict;
+# -----------------------------------------------------------
+# A base is another kind of grouping.  A base is a source package that builds
+# multiple binary packages.  The source package name is the '%BASE%' of each
+# of the binary packages built from it.
+
+# -----------------------------------------------------------
+package Pk::Package;
+use strict;
+
+our %list = ();
+
+sub read_files {
+	my $db = 'local';
+	my $pkgs = {};
+	my @files = map{chomp;$_} `find /var/lib/pacman/local -type f -name desc -o -name files 2>/dev/null`;
+	foreach my $file (@files) {
+		open (my $fh, "<$file") or return $db,$pkgs;
+		my @parts = split(/\//,$file);
+		my ($pkg,$mode) = ($parts[-2],$parts[-1]);
+		$pkg =~ /^(.*)-([^-]*-[^-]*)$/;
+		my $id = "$1;$2";
+		$pkgs->{$id} = {} unless exists $pkgs->{$id};
+		my $data = $pkgs->{$id};
+	LSTANZA:
+		while (<$fh>) { chop;
+			if (/^%([A-Z][A-Z0-9]*)%/) {
+				my $tag = "\L$1\E";
+				$data->{$tag} = [] unless exists $data->{$tag};
+				while (<$fh>) { chop;
+					next LSTANZA if /^\s*$/;
+					push @{$data->{$tag}}, $_;
+				}
+				print STDERR "Unexpeced end of input!\n";
+			}
+			elsif (/^\s*$/) {
+				next;
+			}
+			else {
+				print STDERR "Garbage in input stream!\n";
+			}
+		}
+		close($fh);
+	}
+	return $db,$pkgs;
+}
+sub read_bases {
+	my $base = shift;
+	my $db = $base; $db =~ s/^.*\///; $db =~ s/\.db$//;
+	my $pkgs = {};
+	my $cmd1 = "tar tzf  $base --ignore-failed-read --wildcards --no-wildcards-match-slash '*/desc' '*/files' '*/depends' '*/deltas' 2>/dev/null |";
+	my $cmd2 = "tar xzOf $base --ignore-failed-read --wildcards --no-wildcards-match-slash '*/desc' '*/files' '*/depends' '*/deltas' 2>/dev/null |";
+	open (my $fh1,$cmd1) or return $db, $pkgs;
+	open (my $fh2,$cmd2) or return $db, $pkgs;
+	my ($modechange,$file,$pkg,$id,$mode,$state,$data) = (1);
+DSTANZA:
+	while (<$fh2>) { chop;
+		if (/^%([A-Z][A-Z0-9]*)%/) {
+			my $tag = "\L$1\E";
+		RESTART:
+			if ($modechange) {
+				# changing mode
+				$count++ if $id;
+				$file = <$fh1>;
+				last DSTANZA unless defined $file;
+				chop $file;
+				($pkg,$mode) = split(/\//,$file);
+				$pkg =~ /^(.*)-([^-]*-[^-]*)$/;
+				$id = "$1;$2";
+				$pkgs->{$id} = {} unless exists $pkgs->{$id};
+				$data = $pkgs->{$id};
+				$state = undef;
+				$modechange = undef;
+			}
+			if ($state) {
+				if ($mode eq 'desc') {
+					if ($tag =~ /^(filename|depends|conflicts|provides|optdepends|files|deltas)$/) {
+						$modechange = 1;
+						goto RESTART;
+					}
+				}
+				elsif ($mode eq 'depends') {
+					unless ($tag =~ /^(conflicts|provides|optdepends)$/) {
+						$modechange = 1;
+						goto RESTART;
+					}
+					if ($state eq 'depends') {
+						unless ($tag =~ /^(conflicts|provides|optdepends)$/) {
+							$modechange = 1;
+							goto RESTART;
+						}
+					}
+					elsif ($state eq 'conflicts') {
+						unless ($tag =~ /^(provides|optdepends)$/) {
+							$modechange = 1;
+							goto RESTART;
+						}
+					}
+					elsif ($state eq 'provides') {
+						unless ($tag =~ /^(optdepends)$/) {
+							$modechange = 1;
+							goto RESTART;
+						}
+					}
+					elsif ($state eq 'optdepends') {
+						$modechange = 1;
+						goto RESTART;
+					}
+					$state = $tag;
+				}
+				else {
+					$modechange = 1;
+					goto RESTART;
+				}
+			} else {
+				if ($mode eq 'desc') {
+					unless ($tag eq 'filename') {
+						print STDERR "Lost sync! mode=$mode, tag=$tag, file=$file, id=$id\n";
+						last DSTANZA;
+					}
+				}
+				elsif ($mode eq 'depends') {
+					unless ($tag =~ /^(depends|conflicts|optdepends|provides)$/) {
+						$modechange = 1;
+						goto RESTART;
+					}
+				}
+				elsif ($mode ne $tag) {
+					$modechange = 1;
+					goto RESTART;
+				}
+				$state = $tag;
+			}
+			$data->{$tag} = [] unless exists $data->{$tag};
+			while (<$fh2>) { chop;
+				if (/^\s*$/) {
+				next DSTANZA;
+				}
+				if (/^%([A-Z][A-Z0-9]*)%/) {
+					$tag = "\L$1\E";
+					goto RESTART;
+				}
+				push @{$data->{$tag}}, $_;
+			}
+		}
+		elsif (/^\s*$/) {
+			next;
+		}
+		else {
+			print STDERR "Garbage in input stream! '$_' mode=$mode state=$state\n";
+			next;
+		}
+	}
+	close($fh2);
+	close($fh1);
+	return $db, $pkgs;
+}
+
+sub make_pkgs {
+	my ($type,$appl,$db,$pkgs) = @_;
+	foreach my $namver (sort keys %$pkgs) {
+		my $hash = $pkgs->{$namver};
+		my ($name,$version) = split(/;/,$namver);
+		$hash->{db} = $db;
+		my $arch = $hash->{arch};
+		my $source = $db;
+		$source = 'installed' if $db eq 'local';
+		$hash->{source} = $source;
+		my $id = "$name;$version;$arch;$source";
+		$hash->{id} = $id;
+		$hash->{package_id} = $id;
+		my $summary = $hash->{desc};
+		$summary = substr($summary,0,80).'...' if length($summary) > 83;
+		$hash->{summary} = $summary;
+		my $info = $db eq 'local' ? 'installed' : 'available';
+		$hash->{info} = $info;
+		for (keys %$hash) {
+			if (ref $hash->{$_} eq 'ARRAY') {
+				$hash->{$_} = join(';',@{$hash->{$_}});
+			}
+		}
+		bless $hash,$type;
+		$list{$id} = $hash;
+		$list{$name}{$version}{$arch}{$source} = $hash;
+	}
+}
+
+#
+# Initializing the package database is quickest using a directly perl approach
+# to accessing the tarballs.
+sub init {
+	my ($type,$appl) = @_;
+	my ($db,$pkgs);
+	($db,$pkgs) = read_files();
+	$type->make_pkgs($appl,$db,$pkgs);
+	my @dbs = map{chomp;$_} `find /var/lib/pacman/sync -type f -name '*.db' 2>/dev/null`;
+	for (@dbs) {
+		($db,$pkgs) = read_bases($_);
+		$type->make_pkg($appl,$db,$pkgs);
+	}
+}
+
+sub new {
+	my $self = bless {}, shift;
+	my ($info,$package_id,$summary) = @_;
+	$self->{package_id} = $package_id;
+	$self->{info} = $info;
+	$self->{summary} = $summary;
+	my ($name,$version,$arch,$source) = split(/;/,$package_id);
+	$self->{name} = $name;
+	$self->{version} = $version;
+	$self->{arch} = $arch;
+	$self->{source} = $source;
+	my $store = get Pk::PackageModel;
+	$store->{objects}{$package_id} = $self;
+	my $iter = $self->{iter} = $store->append;
+	my $brief = $summary; $brief = substr($brief,0,100).'...' if length($brief) > 103;
+	$brief =~ s/&/&amp;/g; $brief =~ s/</&lt;/g; $brief =~ s/>/&gt;/g;
+	my $format = "<span foreground=\"blue\">$name $version ($arch)</span>\n".
+		"<small><span foreground=\"grey\">$brief</span></small>";
+	$store->set($iter,
+		&Pk::PKG_COLUMN_ID,		$package_id,
+		&Pk::PKG_COLUMN_INFO,		$info,
+		&Pk::PKG_COLUMN_NAME,		$name,
+		&Pk::PKG_COLUMN_VERSION,	$version,
+		&Pk::PKG_COLUMN_ARCH,		$arch,
+		&Pk::PKG_COLUMN_SOURCE,		$source,
+		&Pk::PKG_COLUMN_SUMMARY,	$summary,
+		&Pk::PKG_COLUMN_SHORT_FORM,	$format,
+	);
+	return $self;
+}
+sub detail {
+	my $self = shift;
+	my ($license,$group,$detail,$url,$size,$member) = @_;
+	$self->{license} = $license;
+	if ($group) { $self->{group} = $group } else { $group = $self->{group} }
+	$self->{detail} = $detail;
+	$self->{url} = $url;
+	$self->{size} = $size;
+	if ($member) { $self->{member} = $member } else { $member = $self->{member} }
+	$group = join("\n",split(/;/,$group));
+	$license = join("\n",split(/;/,$license));
+	$member = join("\n",split(/;/,$member));
+	my $store = get Pk::PackageModel;
+	my $iter = $self->{iter};
+	$store->set($iter,
+		&Pk::PKG_COLUMN_LICENSE,	$license,
+		&Pk::PKG_COLUMN_GROUP,		$group,
+		&Pk::PKG_COLUMN_DETAIL,		$detail,
+		&Pk::PKG_COLUMN_URL,		$url,
+		&Pk::PKG_COLUMN_SIZE,		$size,
+		&Pk::PKG_COLUMN_MEMBER,		$member,
+	);
+	return $self;
+}
+sub del {
+	my $self = shift;
+	my $store = get Pk::PackageModel;
+	my $iter = delete $self->{iter};
+	my $id = $self->{package_id};
+	delete $store->{objects}{$id};
+	$store->remove($iter);
+}
+
+# -----------------------------------------------------------
+package Pk::PackageWindow;
+use base qw(Gtk2::Window);
+use Glib qw(TRUE FALSE);
+use strict;
+
+our $packageWindow;
+
+sub get {
+	return $packageWindow if $packageWindow;
+	return new Pk::PackageWindow;
+}
+
+sub add_list_column {
+	my ($view,$label,$id,$sort,$style) = @_;
+	my $renderer = Gtk2::CellRendererText->new;
+	my $column = Gtk2::TreeViewColumn->new_with_attributes(
+		$label,$renderer,$style=>$id);
+	$column->set_sort_column_id($id) if $sort;
+	$view->append_column($column);
+}
+
+sub new {
+	my $self = bless Gtk2::Window->new('toplevel'), shift;
+	$self->set_wmclass('pkPackages','PkApplet');
+	$self->set_title('Packages');
+	$self->set_gravity('center');
+	$self->set_position('center');
+	$self->set_icon_name('system-software-install');
+	$self->signal_connect(destroy=>sub{$packageWindow = undef; 1});
+	$self->set_border_width(8);
+
+	my $hpane = Gtk2::HPaned->new;
+	$self->add($hpane);
+
+	{
+		my $vbox = Gtk2::VBox->new(FALSE,0);
+		$hpane->pack1($vbox,FALSE,FALSE);
+
+		{
+			# repo pane
+			my $sw = Gtk2::ScrolledWindow->new;
+			$sw->set_shadow_type('etched-in');
+			$sw->set_policy('never','never');
+			$vbox->pack_start($sw,TRUE,TRUE,0);
+
+			my $model = Gtk2::ListStore->new(
+				'Glib::String',
+			);
+			$self->{models}{repo} = $model;
+			my $view = Gtk2::TreeView->new($model);
+			$self->{views}{repo} = $view;
+			$view->set_rules_hint(FALSE);
+			$view->set_search_column(0);
+			$sw->add($view);
+
+			my @columns = (
+				['Repository',	0,		1, 'text'],
+			);
+			foreach my $col (@columns) { add_list_column($view,@$col); }
+
+			my $selection = $view->get_selection;
+			$selection->set_mode('multiple');
+			$selection->signal_connect_swapped(changed=>$self->can('repo_changed'),$self);
+
+			foreach my $event ('button_press_event', 'row_activated') {
+				$view->signal_connect_swapped($event=>$self->can('repo_'.$event),$self);
+			}
+		}
+		{
+			# category pane
+			my $sw = Gtk2::ScrolledWindow->new;
+			$sw->set_shadow_type('etched-in');
+			$sw->set_policy('never','never');
+			$vbox->pack_start($sw,TRUE,TRUE,0);
+
+			my $model = Gtk2::ListStore->new(
+				'Glib::String',
+			);
+			$self->{models}{category} = $model;
+			foreach my $kind (qw/desktop-gnome desktop-kde desktop-other desktop-xfce multimedia other programming system/) {
+				my $iter = $model->append;
+				$model->set($iter,0,$kind);
+			}
+
+			my $view = Gtk2::TreeView->new($model);
+			$self->{views}{category} = $view;
+			$view->set_rules_hint(FALSE);
+			$view->set_search_column(0);
+			$sw->add($view);
+
+			my @columns = (
+				['Category',	0,		1, 'text'],
+			);
+			foreach my $col (@columns) { add_list_column($view,@$col); }
+
+			my $selection = $view->get_selection;
+			$selection->set_mode('multiple');
+			$selection->signal_connect_swapped(changed=>$self->can('category_changed'),$self);
+
+			foreach my $event ('button_press_event', 'row_activated') {
+				$view->signal_connect_swapped($event=>$self->can('category_'.$event),$self);
+			}
+		}
+		{
+			# group pane
+			my $sw = Gtk2::ScrolledWindow->new;
+			$sw->set_shadow_type('etched-in');
+			$sw->set_policy('never','automatic');
+			$vbox->pack_start($sw,TRUE,TRUE,0);
+
+			my $model = Gtk2::ListStore->new(
+				'Glib::String',
+			);
+			$self->{models}{group} = $model;
+			my $view = Gtk2::TreeView->new($model);
+			$self->{views}{group} = $view;
+			$view->set_rules_hint(FALSE);
+			$view->set_search_column(0);
+			$sw->add($view);
+
+			my @columns = (
+				['Group',	0,		1, 'text'],
+			);
+			foreach my $col (@columns) { add_list_column($view,@$col); }
+
+			my $selection = $view->get_selection;
+			$selection->set_mode('multiple');
+			$selection->signal_connect_swapped(changed=>$self->can('group_changed'),$self);
+
+			foreach my $event ('button_press_event', 'row_activated') {
+				$view->signal_connect_swapped($event=>$self->can('group_'.$event),$self);
+			}
+		}
+	}
+	{
+		my $vpane = Gtk2::VPaned->new;
+		$hpane->pack2($vpane,TRUE,TRUE);
+
+		{
+			# package pane
+
+			my $sw = Gtk2::ScrolledWindow->new;
+			$sw->set_shadow_type('etched-in');
+			$sw->set_policy('never','automatic');
+			$vpane->pack1($sw,TRUE,TRUE);
+
+			my $model = get Pk::PackageModel;
+			$self->{models}{package} = $model;
+
+			my $view = Gtk2::TreeView->new($model);
+			$view->set_rules_hint(TRUE);
+			$view->set_search_column(&Pk::PKG_COLUMN_NAME);
+			$sw->add($view);
+			$self->{views}{package} = $view;
+
+			my @columns = (
+				['Package',	&Pk::PKG_COLUMN_SHORT_FORM,	1, 'markup'],
+##				['Id',		&Pk::PKG_COLUMN_ID,		1, 'text'],
+#				['Info',	&Pk::PKG_COLUMN_INFO,		1, 'text'],
+#				['Name',	&Pk::PKG_COLUMN_NAME,		1, 'text'],
+#				['Version',	&Pk::PKG_COLUMN_VERSION,	1, 'text'],
+#				['Arch',	&Pk::PKG_COLUMN_ARCH,		1, 'text'],
+#				['Source',	&Pk::PKG_COLUMN_SOURCE,		1, 'text'],
+##				['Summary',	&Pk::PKG_COLUMN_SUMMARY,	1, 'text'],
+##				['License',	&Pk::PKG_COLUMN_LICENSE,	1, 'text'],
+#				['Group',	&Pk::PKG_COLUMN_GROUP,		1, 'text'],
+##				['Detail',	&Pk::PKG_COLUMN_DETAIL,		1, 'text'],
+##				['URL',		&Pk::PKG_COLUMN_URL,		1, 'text'],
+#				['Member',	&Pk::PKG_COLUMN_MEMBER,		1, 'text'],
+#				['Size',	&Pk::PKG_COLUMN_SIZE,		1, 'text'],
+			);
+
+			foreach my $col (@columns) { add_list_column($view,@$col); }
+
+			my $selection = $view->get_selection;
+			$selection->signal_connect_swapped(changed=>$self->can('changed'),$self);
+
+			foreach my $event ('button_press_event', 'row_activated') {
+				$view->signal_connect_swapped($event=>$self->can($event),$self);
+			}
+
+			$sw->set_size_request(-1,300);
+		}
+		{
+			my $hbox = Gtk2::HBox->new(FALSE,0);
+			$vpane->pack2($hbox,FALSE,TRUE);
+
+			 # $hbox->set_no_show_all(TRUE);
+
+			{
+				# actions panel
+				my $bbox = Gtk2::VButtonBox->new;
+				$bbox->set_layout_default('start');
+				$bbox->set_spacing_default(5);
+				$hbox->pack_start($bbox,FALSE,FALSE,0);
+
+				for (
+					['gtk-add',	    'Install',	    ],
+					['gtk-remove',	    'Remove',	    ],
+					['gtk-refresh',	    'Reinstall',    ],
+					['gtk-properties',  'Files',	    ],
+				) {
+					my $image = Gtk2::Image->new_from_icon_name($_->[0],'button');
+					my $button = Gtk2::Button->new_with_label($_->[1]);
+					$button->set_image($image);
+					$self->{buttons}{$_->[1]} = $button;
+					$bbox->add($button);
+				}
+			}
+			{
+				# properties pane
+
+				my $sw = Gtk2::ScrolledWindow->new;
+				$self->{panes}{props} = $sw;
+				$sw->set_shadow_type('etched-in');
+				$sw->set_policy('never','automatic');
+				$hbox->pack_start($sw,TRUE,TRUE,0);
+
+				my $model = Gtk2::ListStore->new(
+					'Glib::String',
+					'Glib::String',
+					'Glib::String',
+				);
+				$self->{models}{props} = $model;
+				foreach my $prop (
+#					[package_id	=>'Package Id',		],
+#					[info		=>'Info',		],
+					[db		=>'Database',		],
+					[name		=>'Name',		],
+					[version	=>'Version',		],
+					[arch		=>'Architecture',	],
+					[source		=>'Source',		],
+					[summary	=>'Summary',		],
+					[license	=>'License',		],
+					[group		=>'Category',		],
+					[url		=>'URL',		],
+					[size		=>'Size',		],
+					[member		=>'Groups',		],
+					[updates	=>'Updates',		],
+					[obsoletes	=>'Obsoletes',		],
+					[vendor_url	=>'Vendor URL',		],
+					[bugzilla_url	=>'Bugs URL',		],
+					[cve_url	=>'CVE URL',		],
+					[restart	=>'Restart',		],
+					[update_text	=>'Update Text',	],
+					[changelog	=>'Change Log',		],
+					[state		=>'State',		],
+					[issued		=>'Issued',		],
+					[updated	=>'Updated',		],
+					[filename	=>'Filename',		],
+					[builddate	=>'Build Date',		],
+					[installdate	=>'Install Date',	],
+					[packager	=>'Packager',		],
+					[isize		=>'Installed Size',	],
+					[reason		=>'Reason',		],
+					[depends	=>'Depends',		],
+					[optdepends	=>'Opt Depends',	],
+					[conflicts	=>'Conflicts',		],
+					[provides	=>'Provides',		],
+					[deltas		=>'Deltas',		],
+					[replaces	=>'Replaces',		],
+					[files		=>'Files',		],
+					[backup		=>'Backup',		],
+					[has_scriptlet	=>'Scriplet',		],
+					[download_size	=>'Download Size',	],
+					[required_by	=>'Required By',	],
+				) {
+					my $iter = $model->append;
+					$model->set($iter,
+						0,$prop->[1],
+						1,undef,
+						2,$prop->[0],
+					);
+				}
+				my $view = Gtk2::TreeView->new($model);
+				$self->{views}{props} = $view;
+				$view->set_headers_visible(FALSE);
+				$view->set_rules_hint(FALSE);
+				$view->set_search_column(0);
+				$view->set_grid_lines('both');
+				$sw->add($view);
+				my @columns = (
+					['Property',	0,		1, 'text'],
+					['Value',	1,		0, 'text'],
+#				['Variable',	2,		0],
+				);
+				foreach my $col (@columns) { add_list_column($view,@$col); }
+				my $selection = $view->get_selection;
+				$selection->set_mode('none');
+
+				$sw->set_size_request(400,-1);
+			}
+			{
+				# files panel
+				my $sw = Gtk2::ScrolledWindow->new;
+				$self->{panes}{files} = $sw;
+				$sw->set_shadow_type('etched-in');
+				$sw->set_policy('never','automatic');
+				$hbox->pack_end($sw,FALSE,FALSE,0);
+
+				my $buf = Gtk2::TextBuffer->new;
+				$self->{models}{files} = $buf;
+				$buf->set_text("/this/is/a\n/very/good\//file/list");
+
+				my $text = Gtk2::TextView->new_with_buffer($buf);
+				$sw->add($text);
+
+				 # $sw->set_size_request(60,-1);
+			}
+
+			# $hbox->hide_all;
+		}
+	}
+
+	$self->set_default_size(-1,500);
+	$self->show_all;
+
+	$packageWindow = $self;
+	return $self;
+}
+
+sub repo_changed {
+	my $self = shift;
+	my ($selection) = @_;
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub repo_button_press_event {
+	my $self = shift;
+	my ($ev,$view) = @_;
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub repo_row_activated {
+	my $self = shift;
+	my ($path,$column,$view) = @_;
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub category_changed {
+	my $self = shift;
+	my ($selection) = @_;
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub category_button_press_event {
+	my $self = shift;
+	my ($ev,$view) = @_;
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub category_row_activated {
+	my $self = shift;
+	my ($path,$column,$view) = @_;
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub group_changed {
+	my $self = shift;
+	my ($selection) = @_;
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub group_button_press_event {
+	my $self = shift;
+	my ($ev,$view) = @_;
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub group_row_activated {
+	my $self = shift;
+	my ($path,$column,$view) = @_;
+	return Gtk2::EVENT_PROPAGATE;
+}
+
+sub button_press_event {
+	my $self = shift;
+	my ($ev,$view) = @_;
+	return Gtk2::EVENT_PROPAGATE unless $ev->button == 3;
+	my ($path,$column) = $view->get_path_at_pos($ev->x,$ev->y);
+	my $selection = $view->get_selection;
+	$selection->select_path($path);
+	my ($menu,$mi) = Gtk2::Menu->new;
+	$mi = Gtk2::MenuItem->new_with_label("details...");
+	$mi->signal_connect(activate=>sub{
+			Pk::PackageDetail->get->show_props($selection);
+		});
+	$mi->show_all;
+	$menu->append($mi);
+	$mi = Gtk2::SeparatorMenuItem->new;
+	$mi->show_all;
+	$menu->append($mi);
+	$mi = Gtk2::MenuItem->new_with_label("install");
+	$mi->show_all;
+	$menu->append($mi);
+	$mi = Gtk2::MenuItem->new_with_label("remove");
+	$mi->show_all;
+	$menu->append($mi);
+	$mi = Gtk2::MenuItem->new_with_label("reinstall");
+	$mi->show_all;
+	$menu->append($mi);
+	$menu->popup(undef,undef,undef,undef,$ev->button,$ev->time);
+	return Gtk2::EVENT_STOP;
+}
+sub changed_old {
+	my $self = shift;
+	$Pk::PackageDetail::packageDetail->show_props(shift)
+		if $Pk::PackageDetail::packageDetail;
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub row_activated {
+	my $self = shift;
+	my ($path,$column,$view) = @_;
+	Pk::PackageDetail->get->show_props($view->get_selection);
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub changed {
+	my $self = shift;
+	my $selection = shift;
+	my ($model,$iter) = $selection->get_selected;
+	return Gtk2::EVENT_PROPAGATE unless $model;
+	my $id = $model->Gtk2::TreeModel::get($iter,&Pk::PKG_COLUMN_ID);
+	my $pkg = $model->{objects}{$id};
+	return Gtk2::EVENT_PROPAGATE unless $pkg;
+	my $store = $self->{models}{props};
+	my $i = $store->iter_nth_child(undef,0);
+	my $buffer = $self->{models}{files};
+	while ($i) {
+		my $var = $store->get($i,2);
+		my $val = $pkg->{$var};
+		$val = join("\n",split(/;/,$val));
+		$store->set($i,1,$val);
+		$buffer->set_text($val) if $var eq 'files';
+		$i = $store->iter_next($i);
+	}
+	return Gtk2::EVENT_PROPAGATE;
+}
+
+# -----------------------------------------------------------
+package Pk::UpdateModel;
+use base qw(Gtk2::ListStore);
+use strict;
+
+our $updateModel;
+
+sub get {
+	return $updateModel if $updateModel;
+	return new Pk::UpdateModel;
+}
+sub new {
+	$updateModel = bless Gtk2::ListStore->new(
+		'Glib::String', # id
+		'Glib::String', # info
+		'Glib::String', # name
+		'Glib::String', # version
+		'Glib::String', # arch
+		'Glib::String', # source
+		'Glib::String', # summary
+		'Glib::String', # license
+		'Glib::String', # group
+		'Glib::String', # detail
+		'Glib::String', # url
+		'Glib::Int', # size
+		'Glib::String', # member
+		'Glib::String', # short form
+		'Glib::String', # updates
+		'Glib::String', # obsoletes
+		'Glib::String', # vendor_url
+		'Glib::String', # bugzilla_url
+		'Glib::String', # cve_url
+		'Glib::String', # restart
+		'Glib::String', # update_text
+		'Glib::String', # changelog
+		'Glib::String', # state
+		'Glib::String', # issued
+		'Glib::String', # updated
+	), shift;
+	return $updateModel;
+}
+
+# -----------------------------------------------------------
+package Pk::Update;
+use strict;
+
+sub new {
+	my $self = bless {}, shift;
+	my ($info,$package_id,$summary) = @_;
+	$self->{package_id} = $package_id;
+	$self->{info} = $info;
+	$self->{summary} = $summary;
+	my ($name,$version,$arch,$source) = split(/;/,$package_id);
+	$self->{name} = $name;
+	$self->{version} = $version;
+	$self->{arch} = $arch;
+	$self->{source} = $source;
+	my $store = get Pk::UpdateModel;
+	$store->{objects}{$package_id} = $self;
+	my $iter = $self->{iter} = $store->append;
+	my $brief = $summary; $brief = substr($brief,0,100).'...' if length($brief) > 103;
+	$brief =~ s/&/&amp;/g; $brief =~ s/</&lt;/g; $brief =~ s/>/&gt;/g;
+	my $format = "<span foreground=\"blue\">$name $version ($arch)</span>\n".
+		"<small><span foreground=\"grey\">$brief</span></small>";
+	$store->set($iter,
+		&Pk::PKG_COLUMN_ID,		$package_id,
+		&Pk::PKG_COLUMN_INFO,		$info,
+		&Pk::PKG_COLUMN_NAME,		$name,
+		&Pk::PKG_COLUMN_VERSION,	$version,
+		&Pk::PKG_COLUMN_ARCH,		$arch,
+		&Pk::PKG_COLUMN_SOURCE,		$source,
+		&Pk::PKG_COLUMN_SUMMARY,	$summary,
+		&Pk::PKG_COLUMN_SHORT_FORM,	$format,
+	);
+	return $self;
+}
+sub detail {
+	my $self = shift;
+	my ($license,$group,$detail,$url,$size,$member) = @_;
+	$self->{license} = $license;
+	if ($group) { $self->{group} = $group } else { $group = $self->{group} }
+	$self->{detail} = $detail;
+	$self->{url} = $url;
+	$self->{size} = $size;
+	if ($member) { $self->{member} = $member } else { $member = $self->{member} }
+	$group = join("\n",split(/;/,$group));
+	$license = join("\n",split(/;/,$license));
+	$member = join("\n",split(/;/,$member));
+	my $store = get Pk::UpdateModel;
+	my $iter = $self->{iter};
+	$store->set($iter,
+		&Pk::PKG_COLUMN_LICENSE,	$license,
+		&Pk::PKG_COLUMN_GROUP,		$group,
+		&Pk::PKG_COLUMN_DETAIL,		$detail,
+		&Pk::PKG_COLUMN_URL,		$url,
+		&Pk::PKG_COLUMN_SIZE,		$size,
+		&Pk::PKG_COLUMN_MEMBER,		$member,
+	);
+	return $self;
+}
+sub update {
+	my $self = shift;
+	my ($updates,$obsoletes,$vendor_url,$bugzilla_url,$cve_url,$restart,$update_text,$changelog,$state,$issued,$updated) = @_;
+	$self->{updates} = $updates;
+	$self->{obsoletes} = $obsoletes;
+	$self->{vendor_url} = $vendor_url;
+	$self->{bugzilla_url} = $bugzilla_url;
+	$self->{cve_url} = $cve_url;
+	$self->{restart} = $restart;
+	$self->{update_text} = $update_text;
+	$self->{changelog} = $changelog;
+	$self->{state} = $state;
+	$self->{issued} = $issued;
+	$self->{updated} = $updated;
+	my $store = get Pk::UpdateModel;
+	my $iter = $self->{iter};
+	$store->set($iter,
+		&Pk::PKG_COLUMN_UPDATES,	$updates,
+		&Pk::PKG_COLUMN_OBSOLETES,	$obsoletes,
+		&Pk::PKG_COLUMN_VENDOR_URL,	$vendor_url,
+		&Pk::PKG_COLUMN_BUGZILLA_URL,	$bugzilla_url,
+		&Pk::PKG_COLUMN_CVE_URL,	$cve_url,
+		&Pk::PKG_COLUMN_RESTART,	$restart,
+		&Pk::PKG_COLUMN_UPDATE_TEXT,	$update_text,
+		&Pk::PKG_COLUMN_CHANGELOG,	$changelog,
+		&Pk::PKG_COLUMN_STATE,		$state,
+		&Pk::PKG_COLUMN_ISSUED,		$issued,
+		&Pk::PKG_COLUMN_UPDATED,	$updated,
+	);
+	return $self;
+}
+sub del {
+	my $self = shift;
+	my $store = get Pk::UpdateModel;
+	my $iter = delete $self->{iter};
+	my $id = $self->{package_id};
+	delete $store->{objects}{$id};
+	$store->remove($iter);
+}
+
+
+# -----------------------------------------------------------
+package Pk::UpdateWindow;
+use base qw(Gtk2::Window);
+use Glib qw(TRUE FALSE);
+use strict;
+
+our $updateWindow;
+
+sub get {
+	return $updateWindow if $updateWindow;
+	return new Pk::UpdateWindow;
+}
+
+sub add_list_column {
+	my ($view,$label,$id,$sort,$style) = @_;
+	my $renderer = Gtk2::CellRendererText->new;
+	my $column = Gtk2::TreeViewColumn->new_with_attributes(
+		$label,$renderer,$style=>$id);
+	$column->set_sort_column_id($id) if $sort;
+	$view->append_column($column);
+}
+
+sub new {
+	my $self = bless Gtk2::Window->new('toplevel'), shift;
+	$self->set_wmclass('pkUpdates','PkApplet');
+	$self->set_title('Updates');
+	$self->set_gravity('center');
+	$self->set_position('center');
+	$self->set_icon_name('system-software-update');
+	$self->signal_connect(destroy=>sub{$updateWindow = undef; 1});
+	$self->set_border_width(8);
+
+	my $vbox = Gtk2::VBox->new(FALSE,8);
+	$self->add($vbox);
+
+	my $sw = Gtk2::ScrolledWindow->new;
+	$sw->set_policy('never','automatic');
+	$vbox->pack_start($sw,TRUE,TRUE,0);
+
+	my $model = get Pk::UpdateModel;
+	$self->{store} = $model;
+
+	my $view = Gtk2::TreeView->new($model);
+	$view->set_rules_hint(TRUE);
+	$view->set_search_column(&Pk::PKG_COLUMN_NAME);
+	$sw->add($view);
+	$self->{view} = $view;
+
+	my @columns = (
+		['Package',	&Pk::PKG_COLUMN_SHORT_FORM,	1, 'markup',	],
+##		['Id',		&Pk::PKG_COLUMN_ID,		1, 'text',	],
+#		['Info',	&Pk::PKG_COLUMN_INFO,		1, 'text',	],
+#		['Name',	&Pk::PKG_COLUMN_NAME,		1, 'text',	],
+#		['Version',	&Pk::PKG_COLUMN_VERSION,	1, 'text',	],
+#		['Arch',	&Pk::PKG_COLUMN_ARCH,		1, 'text',	],
+#		['Source',	&Pk::PKG_COLUMN_SOURCE,		1, 'text',	],
+##		['Summary',	&Pk::PKG_COLUMN_SUMMARY,	1, 'text',	],
+##		['License',	&Pk::PKG_COLUMN_LICENSE,	1, 'text',	],
+#		['Group',	&Pk::PKG_COLUMN_GROUP,		1, 'text',	],
+##		['Detail',	&Pk::PKG_COLUMN_DETAIL,		1, 'text',	],
+##		['URL',		&Pk::PKG_COLUMN_URL,		1, 'text',	],
+#		['Member',	&Pk::PKG_COLUMN_MEMBER,		1, 'text',	],
+#		['Size',	&Pk::PKG_COLUMN_SIZE,		1, 'text',	],
+##		['Updates',	&Pk::PKG_COLUMN_UPDATES,	1, 'text',	],
+##		['Obsoletes',	&Pk::PKG_COLUMN_OBSOLETES,	1, 'text',	],
+##		['Vendor URL',	&Pk::PKG_COLUMN_VENDOR_URL,	1, 'text',	],
+##		['Bugzilla URL',&Pk::PKG_COLUMN_BUGZILLA_URL,	1, 'text',	],
+##		['CVE URL',	&Pk::PKG_COLUMN_CVE_URL,	1, 'text',	],
+#		['Restart',	&Pk::PKG_COLUMN_RESTART,	1, 'text',	],
+#		['Update Text',	&Pk::PKG_COLUMN_UPDATE_TEXT,	1, 'text',	],
+#		['ChangeLog',	&Pk::PKG_COLUMN_CHANGELOG,	1, 'text',	],
+#		['State',	&Pk::PKG_COLUMN_STATE,		1, 'text',	],
+##		['Issued',	&Pk::PKG_COLUMN_ISSUED,		1, 'text',	],
+##		['Updated',	&Pk::PKG_COLUMN_UPDATED,	1, 'text',	],
+	);
+
+	foreach my $col (@columns) { add_list_column($view,@$col); }
+
+	my $selection = $view->get_selection;
+	$selection->signal_connect_swapped(changed=>$self->can('changed'),$self);
+
+	foreach my $event ('button_press_event', 'row_activated') {
+		$view->signal_connect_swapped($event=>$self->can($event),$self);
+	}
+
+	$self->set_default_size(-1,250);
+	$self->show_all;
+
+	$updateWindow = $self;
+	return $self;
+}
+sub button_press_event {
+	my $self = shift;
+	my ($ev,$view) = @_;
+	return Gtk2::EVENT_PROPAGATE unless $ev->button == 3;
+	my ($path,$column) = $view->get_path_at_pos($ev->x,$ev->y);
+	my $selection = $view->get_selection;
+	$selection->select_path($path);
+	my ($menu,$mi) = Gtk2::Menu->new;
+	$mi = Gtk2::MenuItem->new_with_label("details...");
+	$mi->signal_connect(activate=>sub{
+			Pk::PackageDetail->get->show_props($selection);
+		});
+	$mi->show_all;
+	$menu->append($mi);
+	$mi = Gtk2::SeparatorMenuItem->new;
+	$mi->show_all;
+	$menu->append($mi);
+	$mi = Gtk2::MenuItem->new_with_label("install");
+	$mi->show_all;
+	$menu->append($mi);
+	$mi = Gtk2::MenuItem->new_with_label("remove");
+	$mi->show_all;
+	$menu->append($mi);
+	$mi = Gtk2::MenuItem->new_with_label("reinstall");
+	$mi->show_all;
+	$menu->append($mi);
+	$menu->popup(undef,undef,undef,undef,$ev->button,$ev->time);
+	return Gtk2::EVENT_STOP;
+}
+sub changed {
+	my $self = shift;
+	$Pk::PackageDetail::packageDetail->show_props(shift)
+		if $Pk::PackageDetail::packageDetail;
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub row_activated {
+	my $self = shift;
+	my ($path,$column,$view) = @_;
+	Pk::PackageDetail->get->show_props($view->get_selection);
+	return Gtk2::EVENT_PROPAGATE;
+}
+
+
+# -----------------------------------------------------------
+package Pk::About;
+use strict;
+
+sub show {
+	Gtk2->show_about_dialog($main::app->{mainw},
+		logo_icon_name=>'system-software-install',
+		program_name=>'pk-applet',
+		version=>'0.01',
+		comments=>'A little packagekit applet.',
+		copyright=>'Copyright (c) 2013  OpenSS7 Corporation.',
+		website=>'http://www.unexicon.com/',
+		website_label=>'Unexicon - Linux spun for telecom',
+		authors=>['Brian F. G. Bidulock <bidulock@openss7.org>'],
+		license=><<EOF,
+Do what thou wilt shall be the whole of the law.
+-- Aleister Crowley
+EOF
+		# logo=>,
+	);
+}
+
+# -----------------------------------------------------------
+package Pk::Notify;
+use base qw(Gtk2::Notify);
+use strict;
+
+sub new {
+	my $self = bless Gtk2::Notify->new("PackageKit","PackageKit notification","system-software-install"), shift;
+	$self->signal_connect_swapped(closed=>$self->can('closed'),$self);
+	$self->{state} = 0;
+	$self->show;
+	return $self;
+}
+sub closed {
+	my ($self,$notify) = @_;
+	$self->{state} = 0;
+	return Gtk2::EVENT_PROPAGATE;
+}
+
+# -----------------------------------------------------------
+package Pk::Icon;
+use base qw(Gtk2::StatusIcon);
+use strict;
+
+sub new {
+	my $self = bless Gtk2::StatusIcon->new_from_icon_name('system-software-update'), shift;
+	$self->{notify} = Pk::Notify->new($self);
+	$self->set_tooltip_text('PackageKit applet.');
+	$self->set_visible(1);
+	foreach my $sig ('popup_menu', 'activate', 'query_tooltip') {
+		$self->signal_connect($sig=>$self->can($sig));
+	}
+	return $self;
+}
+sub query_tooltip {
+	my ($self,$x,$y,$bool,$tooltip) = @_;
+#	print "query-tooltip: ",join(', ',@_),"\n";
+#	print "Tooltip query!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub activate {
+	my ($self) = @_;
+	my $window = get Pk::PackageWindow;
+	$window->deiconify;
+	$window->show;
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub popup_menu {
+	my ($self,$button,$time) = @_;
+	my ($menu,$mi,$im) = Gtk2::Menu->new;
+	$mi = Gtk2::ImageMenuItem->new_with_label('Packages...');
+	$mi->signal_connect(activate=>sub{ get Pk::PackageWindow; 1; });
+	$im = Gtk2::Image->new_from_icon_name('system-software-install','menu');
+	$mi->set_image($im);
+	$mi->show_all;
+	$menu->append($mi);
+	$mi = Gtk2::ImageMenuItem->new_with_label('Updates...');
+	$mi->signal_connect(activate=>sub{ get Pk::UpdateWindow; 1; });
+	$im = Gtk2::Image->new_from_icon_name('system-software-update','menu');
+	$mi->set_image($im);
+	$mi->show_all;
+	$menu->append($mi);
+	$mi = Gtk2::ImageMenuItem->new_with_label('Repos...');
+	$mi->signal_connect(activate=>sub{ get Pk::RepoWindow; 1; });
+	$im = Gtk2::Image->new_from_icon_name('system-file-manager','menu');
+	$mi->set_image($im);
+	$mi->show_all;
+	$menu->append($mi);
+	$mi = Gtk2::ImageMenuItem->new_with_label('About...');
+	$mi->signal_connect(activate=>sub{ Pk::About->show; });
+	$im = Gtk2::Image->new_from_stock('gtk-about','menu');
+	$mi->set_image($im);
+	$mi->show_all;
+	$menu->append($mi);
+	$mi = Gtk2::SeparatorMenuItem->new;
+	$mi->show_all;
+	$menu->append($mi);
+	$mi = Gtk2::ImageMenuItem->new_with_label('Quit');
+	$im = Gtk2::Image->new_from_stock('gtk-quit','menu');
+	$mi->set_image($im);
+	$mi->show_all;
+	$mi->signal_connect(activate=>sub{ Gtk2->main_quit(); 1; });
+	$menu->append($mi);
+	$menu->popup(undef,undef,undef,undef,$button,$time);
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub button_press_event {
+	my ($self,$event) = @_;
+#	print "button-press-event: ",join(', ',@_),"\n";
+#	print "Button pressed!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub button_release_event {
+	my ($self,$event) = @_;
+#	print "button-release-event: ",join(', ',@_),"\n";
+#	print "Button released!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub scroll_event {
+	my ($self,$event) = @_;
+#	print "scroll-event: ",join(', ',@_),"\n";
+#	print "Scroll!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+sub size_changed {
+	my ($self,$pixels) = @_;
+#	print "size-changed: ",join(', ',@_),"\n";
+#	print "Size changed to $pixels!\n";
+	return Gtk2::EVENT_PROPAGATE;
+}
+
+# -----------------------------------------------------------
+package Pk::Application;
+use base qw(Gtk2::UniqueApp);
+use Glib qw(TRUE FALSE);
+use ALPM;
+use Time::gmtime;
+use strict;
+
+use constant {
+	COMMAND_APPLET   => 1,
+	COMMAND_PACKAGES => 2,
+	COMMAND_UPDATES	 => 3,
+	COMMAND_REPOS	 => 4,
+};
+
+sub new {
+	my $self = bless Gtk2::UniqueApp->new(
+		'com.unexicon.PkApplet', undef,
+		'pk-applet'	=> &COMMAND_APPLET,
+		'pk-packages'	=> &COMMAND_PACKAGES,
+		'pk-updates'	=> &COMMAND_UPDATES,
+		'pk-repos'	=> &COMMAND_REPOS,
+	), shift;
+	if ($self->is_running) {
+		my $cmd = $0; $cmd =~ s/^.*\///;
+		$self->send_message_by_name($cmd=>text=>join('|',$0,@ARGV));
+		exit(0);
+	}
+	$self->{mainw} = Gtk2::Window->new('toplevel');
+	$self->{mainw}->set_wmclass('pkApplet','PkApplet');
+	$self->{mainw}->set_default_icon_name('system-software-install');
+	$self->watch_window($self->{mainw});
+	$self->signal_connect(message_received=>
+		$self->can('message_received'));
+	$self->{icon} = new Pk::Icon;
+
+	my $dbasedir = $self->{dbasedir} = '/var/lib/pacman';
+	my $cachedir = $self->{cachedir} = '/var/cache/pacman';
+	my $alpm = $self->{alpm} = ALPM->new('/', $dbasedir);
+	$alpm->set_cachedirs($cachedir);
+	$alpm->set_logfile('/tmp/pacman.log');
+	foreach my $repo ('custom', 'unexicon', 'core', 'extra', 'community', 'community-testing') {
+		eval { $alpm->register($repo); };
+	}
+
+	$self->{packages} = {};
+	$self->{repos} = {};
+	$self->{repolist} = [];
+	$self->{updates} = {};
+	$self->{details} = [];
+	$self->{pkit} = Pk::Manager->new($self);
+
+	$self->GetGroups;
+
+	push @{$self->{queue}}, [ 'RefreshCache', undef ];
+	push @{$self->{queue}}, [ 'GetRepoList', 'none' ];
+	push @{$self->{queue}}, [ 'GetUpdates',  'none' ];
+#	push @{$self->{queue}}, [ 'GetPackages', 'none' ];
+	$self->runqueue;
+#	get Pk::PackageWindow;
+#	get Pk::UpdateWindow;
+#	get Pk::RepoWindow;
+	return $self;
+}
+
+sub message_received {
+	my ($self,$command,$message,$time) = @_;
+	if ($command == &COMMAND_PACKAGES) {
+		my $win = get Av::PackageWindow;
+		$win->set_screen($message->get_screen);
+	} elsif ($command == &COMMAND_UPDATES) {
+		my $win = get Av::UpdateWindow;
+		$win->set_screen($message->get_screen);
+	} elsif ($command == &COMMAND_REPOS) {
+		my $win = get Av::RepoWindow;
+		$win->set_screen($message->get_screen);
+	} elsif ($command == &COMMAND_APPLET) {
+		my $text = $message->get_text;
+		my @args = split(/\|/,$text);
+		my $prog = shift @args;
+		print STDERR "Another instance was executed as $prog ",join(' ',@args),"\n";
+	} else {
+		print STDERR "Bad command value $command\n";
+	}
+	return 'ok';
+}
+
+sub GetGroupsPacman {
+	my $self = shift;
+	# Use pacman to get groups cause ALPM is broken.
+	my $fh;
+	if (open($fh,"pacman -Qg |")) {
+		while (<$fh>) { chomp; chomp;
+			my ($group,$pkg) = split(/\s/,$_);
+			if (defined $pkg and $pkg) {
+				$self->{groups}{$group}{$pkg} = 1;
+				$self->{pkggroups}{$pkg}{$group} = 1;
+			}
+			elsif (defined $group and $group) {
+				$self->{groups}{$group} = {}
+				unless exists $self->{groups}{$group};
+			}
+		}
+		close($fh);
+	}
+	if (open($fh,"pacman -Sg |")) {
+		while (<$fh>) { chomp; chomp;
+			my ($group,$pkg) = split(/\s/,$_);
+			if (defined $pkg and $pkg) {
+				$self->{groups}{$group}{$pkg} = 1;
+				$self->{pkggroups}{$pkg}{$group} = 1;
+			}
+			elsif (defined $group and $group) {
+				$self->{groups}{$group} = {}
+				unless exists $self->{groups}{$group};
+			}
+		}
+		close($fh);
+	}
+}
+sub GetCategories {
+	my $self = shift;
+	# The /etc/PackageKit/alpm.d/groups.list file contains the mapping
+	# from pacman groups into PackageKit groups.  Each line contains
+	# a pacman package group with whitespace and then the corresponding
+	# PackageKit group.  Anything that doesn't fit into here is likely
+	# just mapped to 'other'.  So we can actually use a tree-store for
+	# the categories and groups.
+	if (open(my $fh, '<', '/etc/PackageKit/alpm.d/groups.list')) {
+		while (<$fh>) { chop;
+			my ($group,$category) = split(/\s+/,$_,2);
+			my $cat = $self->{categories}{$category};
+			unless ($cat) {
+				$cat = Pk::Category->new($category);
+				$self->{categories}{$category} = $cat;
+			}
+			$cat->add_group($group);
+		}
+		close($fh);
+	}
+}
+sub GetGroupsPkit {
+	my $self = shift;
+	# I think that these are a different kind of group than what
+	# pacman thinks of groups.
+	my $pkit = $self->{pkit};
+	my $categories;
+	eval { $categories = $pkit->Get('org.freedesktop.PackageKit','Groups'); };
+	if ($categories) {
+		print STDERR "PackageKit Categories: $categories\n";
+		foreach my $category (split(/;/,$categories)) {
+			$self->{categories}{$category} = new Pk::Category($category)
+				unless exists $self->{categories}{$category}
+					  and $self->{categories}{$category};
+		}
+	}
+	my $filters;
+	eval { $filters = $pkit->Get('org.freedesktop.PackageKit','Filters'); };
+	if ($filters) {
+		print STDERR "PackageKit Filters: $filters\n";
+		foreach my $filter (split(/;/,$filters)) {
+			$self->{filters}{$filter} = {}
+			unless exists $self->{filters}{$filter};
+		}
+	}
+}
+#
+# Probably don't need to do this anymore: we know to which group each
+# package belongs and can reverse quite easily.
+#
+sub GetGroupsAlpm {
+	my $self = shift;
+	# pacman is not good at getting the packages in a group in
+	# sync databases
+	foreach my $group (sort keys %{$self->{groups}}) {
+		foreach my $db ($self->{alpm}->dbs) {
+			my @pkgs = $db->find_group($group);
+			foreach my $pkg (map {$_->name} @pkgs) {
+				if (defined $pkg and $pkg) {
+					$self->{groups}{$group}{$pkg} = 1;
+					$self->{pkggroups}{$pkg}{$group} = 1;
+				}
+			}
+		}
+	}
+}
+sub GetGroups {
+	my $self = shift;
+	$self->GetGroupsPacman;
+	$self->GetGroupsPkit;
+	$self->GetGroupsAlpm;
+}
+sub GetPackagesAlpmAll {
+	my $self = shift;
+	print STDERR "Executing GetPackagesAlpmAll(",join(',',@_),")...\n";
+	my $count = 0;
+	my $alpm = $self->{alpm};
+	# This is how we get ALL the packages
+	foreach my $db ($alpm->dbs) {
+		# fake out what package kit does here
+		my ($source,$info);
+		if ($db->name eq 'local') {
+			$source = 'installed';
+			$info = 'installed';
+		} else {
+			$source = $db->name;
+			$info = 'available';
+		}
+		foreach my $pdata ($db->search('')) {
+			my $name = $pdata->name;
+			my $version = $pdata->version;
+			my $arch = $pdata->arch;
+			my $summary = $pdata->desc;
+			$summary = substr($summary,0,100).'...' if length($summary) > 103;
+			my $id = "$name;$version;$arch;$source";
+			my $pkg = $self->{packages}{$id};
+			unless ($pkg) {
+				$pkg =  Pk::Package->new($info,$id,$summary);
+				$self->{packages}{$id} = $pkg;
+			}
+			my $license = join(';',@{$pdata->licenses});
+			$license = join(';',split(/:/,$license));
+			my $group = join(';',sort keys %{$self->{pkggroups}{$name}});
+			my $detail = $pdata->desc;
+			my $url = $pdata->url;
+			my $size = $pdata->size;
+			$pkg->detail($license,undef,$detail,$url,$size,$group);
+			 # fill out some more fields....
+			for (qw/filename packager isize reason has_scriptlet download_size
+				changelog requiredby/)
+			{
+				my $val = $pdata->$_;
+				next unless $val;
+				$pkg->{$_} = ref($val) eq 'ARRAY'?join(';',@$val):$val;
+			}
+			$pkg->{db} = $pdata->db->name;
+			for (qw/builddate installdate/) {
+				my $val = $pdata->$_;
+				next unless $val;
+				$pkg->{$_} = gmctime($val);
+			}
+
+			$count++;
+		}
+	}
+	print STDERR "...done GetPackagesAlpmAll, primed $count packages.\n";
+}
+sub GetPackagesAlpm {
+	my $self = shift;
+	print STDERR "Executing GetPackagesAlpm(",join(',',@_),")...\n";
+	my $alpm = $self->{alpm};
+	# use $alpm to prime the packages lists because it is quite good
+	# at that.
+	# Unfortunately, this is just the packages that belong to groups,
+	# which is missing about 5000 packages.
+	my $count = 0;
+	foreach my $db ($alpm->dbs) {
+		# fake out what package kit does here
+		my ($source,$info);
+		if ($db->name eq 'local') {
+			$source = 'installed';
+			$info = 'installed';
+		} else {
+			$source = $db->name;
+			$info = 'available';
+		}
+		foreach my $pkg (sort keys %{$self->{pkggroups}}) {
+			my $pdata;
+			eval { $pdata = $db->find($pkg); };
+			if ($pdata) {
+				my $name = $pdata->name;
+				my $version = $pdata->version;
+				my $arch = $pdata->arch;
+				my $summary = $pdata->desc;
+				$summary = substr($summary,0,100).'...' if length($summary) > 103;
+				my $id = "$name;$version;$arch;$source";
+				unless (exists $self->{packages}{$id}) {
+					$self->{packages}{$id} = Pk::Package->new($info,$id,$summary);
+					my $license = join(';',@{$pdata->licenses});
+					my $group = join(';',sort keys %{$self->{pkggroups}{$name}});
+					my $detail = $pdata->desc;
+					my $url = $pdata->url;
+					my $size = $pdata->size;
+					$self->{packages}{$id}->detail($license,undef,$detail,$url,$size,$group);
+					$count++;
+				}
+			}
+		}
+	}
+	print STDERR "...done GetPackagesAlpm, primed $count packages.\n";
+}
+
+sub GetPackagesPkit {
+	my $self = shift;
+	push @{$self->{queue}},[ 'GetPackages', 'none' ];
+	$self->runqueue;
+}
+
+sub read_files {
+	my ($self,$pkgs,$db,$cmd) = @_;
+	my $data = {};
+	my $count = 0;
+	if (open(my $fh,$cmd)) {
+STANZA:		while (<$fh>) { chomp;
+			if (/^%((FILE)?NAME)%$/) {
+				my $tag = "\L$1\E";
+				if (exists $data->{$tag} and $data->{$tag}) {
+					$data->{source} = [$db];
+					$data->{id} = "$data->{name}[0];$data->{version}[0];$data->{arch}[0];$data->{source}[0]";
+					$pkgs->{$data->{id}} = $data;
+					$data = {};
+					$count++;
+				}
+			}
+			if (/^%([A-Z][A-Z0-9]*)%$/) {
+				my $tag = "\L$1\E";
+				$data->{$tag} = []
+					unless exists $data->{$tag};
+				while (<$fh>) { chomp;
+					next STANZA if /^\s*$/;
+					push @{$data->{$tag}}, $_;
+				}
+			}
+			elsif (/^\s*$/) {
+				next;
+			}
+			else {
+				print STDERR "Garbage in input stream! '$_'\n";
+				next;
+			}
+			print STDERR "Unexpected end of input!\n";
+		}
+		close($fh);
+	}
+	return $count;
+}
+
+sub GetPackagesRaw {
+	my $self = shift;
+	print STDERR "Executing GetPackagesRaw(",join(',',@_),")...\n";
+	my $locldir = "$self->{dbasedir}/local";
+	my $syncdir = "$self->{dbasedir}/sync";
+	my $cmd;
+	my @dbs = ( `find $syncdir -type f -name '*.db'` );
+	$self->{sync} = {};
+	for (@dbs) { chomp;
+		$cmd = "tar xzOf $_ --wildcards --no-wildcards-match-slash '*/desc' |";
+		my $db = $_; $db =~ s/^.*\///; $db =~ s/\.db$//;
+		print STDERR "Processing Database $_...\n";
+		my $count = $self->read_files($self->{sync},$db,$cmd);
+		print STDERR "...objtained $count packages.\n";
+	}
+	$self->{locl} = {};
+	print STDERR "Processing Database local...\n";
+	$cmd = "find $locldir -type f -name desc|xargs cat |";
+	my $count = $self->read_files($self->{locl},'installed',$cmd);
+	print STDERR "...objtained $count packages.\n";
+	for (sort keys %{$self->{locl}}) {
+		my $data = $self->{locl}{$_};
+		my $pkg = $self->{packages}{$data->{id}};
+		unless ($pkg) {
+			$pkg = $self->{packages}{$data->{id}} =
+				new Pk::Package(
+					'installed',
+					$data->{id},
+					defined $data->{desc}?$data->{desc}[0]:undef,
+					);
+		}
+		$pkg->detail(
+				defined $data->{license}?join(';',@{$data->{license}}):undef,
+				undef,
+				defined $data->{desc}?join(';',@{$data->{desc}}):undef,
+				defined $data->{url}?$data->{url}[0]:undef,
+				defined $data->{isize}?$data->{isize}[0]:undef,
+				defined $data->{group}?join(';',@{$data->{group}}):undef,
+			    );
+		for (qw/filename base desc csize packager builddate/) {
+			next unless $data->{$_};
+			my $val = $data->{$_}[0];
+			next unless $val;
+			$val = gmctime($val) if /builddate/;
+			$pkg->{$_} = $val;
+		}
+		for (qw/replaces depends conflicts provides optdepends files/) {
+			next unless $data->{$_};
+			my $val = join(';',@{$data->{$_}});
+			next unless $val;
+			$pkg->{$_} = $val;
+		}
+	}
+	delete $self->{locl};
+	for (sort keys %{$self->{sync}}) {
+		my $data = $self->{sync}{$_};
+		my $pkg = $self->{packages}{$data->{id}};
+		unless ($pkg) {
+			$pkg = $self->{packages}{$data->{id}} =
+				new Pk::Package(
+					'available',
+					$data->{id},
+					defined $data->{desc}?$data->{desc}[0]:undef,
+					);
+		}
+		$pkg->detail(
+				defined $data->{license}?join(';',@{$data->{license}}):undef,
+				undef,
+				defined $data->{desc}?join(';',@{$data->{desc}}):undef,
+				defined $data->{url}?$data->{url}[0]:undef,
+				defined $data->{isize}?$data->{isize}[0]:undef,
+				defined $data->{group}?join(';',@{$data->{group}}):undef,
+			    );
+		for (qw/filename base desc csize packager builddate/) {
+			next unless $data->{$_};
+			my $val = $data->{$_}[0];
+			next unless $val;
+			$val = gmctime($val) if /builddate/;
+			$pkg->{$_} = $val;
+		}
+		for (qw/replaces depends conflicts provides optdepends files/) {
+			next unless $data->{$_};
+			my $val = join(';',@{$data->{$_}});
+			next unless $val;
+			$pkg->{$_} = $val;
+		}
+	}
+	delete $self->{sync};
+}
+
+sub GetPackages {
+	my $self = shift;
+	print STDERR "Executing GetPackages(",join(',',@_),")...\n";
+	$self->GetPackagesRaw;
+# $self->GetPackagesAlpm;
+	$self->GetPackagesAlpmAll;
+	# stop here for now
+	print STDERR "Done GetPackagesRaw...\n";
+	$self->GetPackagesPkit;
+}
+
+sub runqueue {
+	my $self = shift;
+	if ( my $action = shift @{$self->{queue}} ) {
+		my $xact = Pk::Transaction->new($self,$self->{pkit});
+		my $func = shift @$action;
+		$self->{func} = $func;
+		print STDERR "Running transaction $func\(",join(',',@$action),"\)...\n";
+		eval { $xact->$func(@$action); };
+	}
+}
+
+sub TransactionListChanged {
+	my $self = shift;
+	my $pkit = shift;
+	my ($xacts) = @_;
+	#print STDERR "TransactionListChanged: ", join(',',@$xacts),"\n";
+}
+sub RestartSchedule {
+	my $self = shift;
+	my $pkit = shift;
+	#print STDERR "RestartSchedule:",join(',',@_),"\n";
+}
+sub RepoListChanged {
+	my $self = shift;
+	my $pkit = shift;
+	#print STDERR "RepoListChanged:",join(',',@_),"\n";
+}
+sub UpdatesChanged {
+	my $self = shift;
+	my $pkit = shift;
+	#print STDERR "UpdatesChanged:",join(',',@_),"\n";
+}
+sub PkitChanged {
+	my $self = shift;
+	my $pkit = shift;
+	#print STDERR "Changed: ",join(',',@_),"\n";
+}
+sub Category {
+	my $self = shift;
+	my $xact = shift;
+	my ($parent_id,$cat_id,$name,$summary,$icon) = @_;
+	#print STDERR "Category: ",join(',',@_),"\n";
+}
+sub Details {
+	my $self = shift;
+	my $xact = shift;
+	my $package_id = shift;
+	my ($license,$group,$detail,$url,$size) = @_;
+	#print STDERR "Details: ",join(',',@_),"\n";
+	my $pkg = $self->{packages}{$package_id};
+	$pkg = $self->{updates}{$package_id} unless $pkg;
+	$pkg->detail(@_) if $pkg;
+}
+sub ErrorCode {
+	my $self = shift;
+	my $xact = shift;
+	my ($code,$details) = @_;
+	#print STDERR "ErrorCode: ",join(',',@_),"\n";
+}
+sub Files {
+	my $self = shift;
+	my $xact = shift;
+	my ($package_id,$file_list) = @_;
+	#print STDERR "Files: ",join(',',@_),"\n";
+}
+sub Finished {
+	my $self = shift;
+	my $xact = shift;
+	my ($exit,$runtime) = @_;
+	#print STDERR "Finished: ",join(',',@_),"\n";
+	$xact->destroy;
+	if ($self->{func} eq 'GetUpdates') {
+		if (%{$self->{updates}}) {
+			$self->{details} = [ keys %{$self->{updates}} ];
+			push @{$self->{queue}}, [ 'GetDetails',       [ splice(@{$self->{details}},0,500) ] ];
+			push @{$self->{queue}}, [ 'GetUpdateDetail', [ keys %{$self->{updates}} ] ];
+		}
+		$self->GetPackages;
+		return;
+		push @{$self->{queue}}, [ 'GetPackages', 'none' ];
+	}
+	elsif ($self->{func} eq 'GetPackages') {
+		if (%{$self->{packages}}) {
+			$self->{details} = [ keys %{$self->{packages}} ];
+			push @{$self->{queue}}, [ 'GetDetails',       [ splice(@{$self->{details}},0,500) ] ];
+		}
+	}
+	elsif ($self->{func} eq 'GetDetails') {
+		if (@{$self->{details}}) {
+			push @{$self->{queue}}, [ 'GetDetails',       [ splice(@{$self->{details}},0,500) ] ];
+		}
+	}
+	$self->runqueue;
+}
+sub Message {
+	my $self = shift;
+	my $xact = shift;
+	my ($type,$details) = @_;
+	#print STDERR "Message: ",join(',',@_),"\n";
+}
+sub Package {
+	my $self = shift;
+	my $xact = shift;
+	my ($info,$package_id,$summary) = @_;
+	#print STDERR "Package: ",join(',',@_),"\n";
+	if ($self->{func} eq 'GetPackages') {
+		unless (exists $self->{packages}{$package_id}) {
+			$self->{packages}{$package_id} = Pk::Package->new(@_);
+			#push @{$self->{queue}}, [ 'GetDetails', [$package_id] ];
+		}
+	}
+	if ($self->{func} eq 'GetUpdates') {
+		unless (exists $self->{updates}{$package_id}) {
+			$self->{updates}{$package_id} = Pk::Update->new(@_);
+			#push @{$self->{queue}}, [ 'GetUpdateDetail', [$package_id] ];
+			#push @{$self->{queue}}, [ 'GetDetails', [$package_id] ];
+		}
+	}
+}
+sub RepoDetail {
+	my $self = shift;
+	my $xact = shift;
+	my ($repo_id,$description,$enabled) = @_;
+	#print STDERR "RepoDetail: ",join(',',@_),"\n";
+	unless (exists $self->{repos}{$repo_id}) {
+		my $repo = Pk::Repo->new(@_);
+		$self->{repos} = $repo;
+		push @{$self->{repolist}}, $repo;
+	}
+}
+sub RepoSignatureRequired {
+	my $self = shift;
+	my $xact = shift;
+	my ($package_id,$repository_name,$key_url,$key_userid,$key_id,$key_fingerprint,$key_timestamp,$type) = @_;
+	#print STDERR "RepoSignatureRequired: ",join(',',@_),"\n";
+}
+sub EulaRequired {
+	my $self = shift;
+	my $xact = shift;
+	my ($eula_id,$package_id,$vendor_name,$license_agreement) = @_;
+	#print STDERR "EulaRequired: ",join(',',@_),"\n";
+}
+sub MediaChangeRequired {
+	my $self = shift;
+	my $xact = shift;
+	my ($media_id,$media_text) = @_;
+	#print STDERR "MediaChangeRequired: ",join(',',@_),"\n";
+}
+sub RequireRestart {
+	my $self = shift;
+	my $xact = shift;
+	my ($type,$package_id) = @_;
+	#print STDERR "RequireRestart: ",join(',',@_),"\n";
+}
+sub Transaction {
+	my $self = shift;
+	my $xact = shift;
+	my ($old_tid,$timespec,$succeeded,$role,$duration,$data,$uid,$cmdline) = @_;
+	#print STDERR "Transaction: ",join(',',@_),"\n";
+}
+sub UpdateDetail {
+	my $self = shift;
+	my $xact = shift;
+	my $package_id = shift;
+	my ($updates,$obsoletes,$vendor_url,$bugzilla_url,$cve_url,$restart,$update_text,$changelog,$state,$issued,$updated) = @_;
+	#print STDERR "UpdateDetail: ",join(',',@_),"\n";
+	if (my $pkg = $self->{updates}{$package_id}) {
+		$pkg->update(@_);
+	}
+}
+sub DistroUpgrade {
+	my $self = shift;
+	my $xact = shift;
+	my ($type,$name,$summary) = @_;
+	#print STDERR "DistroUpgrade: ",join(',',@_),"\n";
+}
+sub ItemProgress {
+	my $self = shift;
+	my $xact = shift;
+	my ($id,$percentage) = @_;
+	#print STDERR "ItemProgress: ",join(',',@_),"\n";
+}
+sub XactChanged {
+	my $self = shift;
+	my $xact = shift;
+	#print STDERR "Changed: ",join(',',@_),"\n";
+	# If we are allowed to cancel (property AllowCancel == 1) then we
+	# should display a cancel button along with a progress bar.  When
+	# (property Percentage == 101) the main process is finished.  When
+	# (property Subpercentage == 101) the subprocess is finished.
+	# (property Role) tells us what the transaction is.  (property
+	# Status) tells us the status (well state) of the process.  For
+	# refreshing caches that is wait->setup->download->finished
+}
+sub Destroy {
+	my $self = shift;
+	my $xact = shift;
+	#print STDERR "Destroy: ",join(',',@_),"\n";
+}
+
+
+# -----------------------------------------------------------
+package main;
+use strict;
+
+my $app = Pk::Application->new;
+
+Gtk2->main;
+
+
+

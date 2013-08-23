@@ -1,0 +1,80 @@
+node / {
+  node /org {
+    node /org/freedesktop {
+      node /org/freedesktop/PackageKit {
+        interface org.freedesktop.DBus.Properties {
+          methods:
+            Get(in  s interface_name,
+                in  s property_name,
+                out v value);
+            GetAll(in  s interface_name,
+                   out a{sv} properties);
+            Set(in  s interface_name,
+                in  s property_name,
+                in  v value);
+          signals:
+            PropertiesChanged(s interface_name,
+                              a{sv} changed_properties,
+                              as invalidated_properties);
+          properties:
+        };
+        interface org.freedesktop.DBus.Introspectable {
+          methods:
+            Introspect(out s xml_data);
+          signals:
+          properties:
+        };
+        interface org.freedesktop.DBus.Peer {
+          methods:
+            Ping();
+            GetMachineId(out s machine_uuid);
+          signals:
+          properties:
+        };
+        interface org.freedesktop.PackageKit {
+          methods:
+            @org.freedesktop.DBus.GLib.Async("")
+            CanAuthorize(in  s action_id,
+                         out s result);
+            @org.freedesktop.DBus.GLib.Async("")
+            GetTid(out s tid);
+            GetTimeSinceAction(in  s role,
+                               out u seconds);
+            GetTransactionList(out as transactions);
+            StateHasChanged(in  s reason);
+            SuggestDaemonQuit();
+            GetDaemonState(out s state);
+            @org.freedesktop.DBus.GLib.Async("")
+            SetProxy(in  s proxy_http,
+                     in  s proxy_https,
+                     in  s proxy_ftp,
+                     in  s proxy_socks,
+                     in  s no_proxy,
+                     in  s pac);
+            @org.freedesktop.DBus.GLib.Async("")
+            SetRoot(in  s root);
+          signals:
+            TransactionListChanged(as transactions);
+            RestartSchedule();
+            RepoListChanged();
+            UpdatesChanged();
+            Changed();
+          properties:
+            readonly u VersionMajor = 0;
+            readonly u VersionMinor = 7;
+            readonly u VersionMicro = 6;
+            readonly s BackendName = 'alpm';
+            readonly s BackendDescription = 'alpm';
+            readonly s BackendAuthor = 'Jonathan Conder <jonno.conder@gmail.com>';
+            readonly s Roles = 'cancel;get-depends;get-details;get-files;get-packages;get-repo-list;get-requires;get-update-detail;get-updates;install-files;install-packages;refresh-cache;remove-packages;repo-enable;resolve;search-details;search-file;search-group;search-name;update-packages;what-provides;download-packages;simulate-install-files;simulate-install-packages;simulate-remove-packages;simulate-update-packages';
+            readonly s Groups = 'desktop-gnome;desktop-kde;desktop-other;desktop-xfce;multimedia;other;programming;system';
+            readonly s Filters = 'installed';
+            readonly s MimeTypes = 'application/x-compressed-tar;application/x-xz-compressed-tar';
+            readonly b Locked = false;
+            readonly s NetworkState = 'online';
+            readonly s DistroId = 'arch;current;i686';
+        };
+      };
+    };
+  };
+};
