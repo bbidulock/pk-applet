@@ -1,9 +1,0 @@
-*.swp
-MYMETA.json
-MYMETA.yml
-Makefile
-Makefile.old
-sd-applet-*-any.pkg.tar.xz
-sd-applet-*.src.tar.gz
-sd-applet-*.tar.gz
-*.log
