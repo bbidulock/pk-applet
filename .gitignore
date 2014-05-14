@@ -1,0 +1,12 @@
+.*.sw[nop]
+MYMETA.json
+MYMETA.yml
+Makefile
+Makefile.old
+av-applet-*-any.pkg.tar.xz
+av-applet-*.src.tar.gz
+av-applet-*.tar.gz
+*.log
+blib/
+pm_to_blib
+_install

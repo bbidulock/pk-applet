@@ -1,0 +1,13 @@
+
+[Desktop Entry]
+Encoding=UTF-8
+Type=Application
+Name=Software Package Management
+GenericName=Software installation and management
+Icon=system-software-install
+Exec=pk-applet
+Terminal=false
+Categories=TrayIcon;Settings;PackageManager;GTK;
+StartupNotify=true
+NotShowIn=GNOME;KDE;XFCE;LXDE;
+X-GNOME-Autostart-enabled=true
